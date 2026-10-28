@@ -55,6 +55,7 @@ pre{margin:0;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;col
     <section><h2>ไม้ virtual ที่เปิดอยู่ (AI)</h2><div id="open"></div></section>
     <section><h2>ไม้จริงใน MT5</h2><div id="pos"></div></section>
   </div>
+  <section><h2>กระดาน 25 คู่ (คำตอบล่าสุดของ AI ต่อคู่)</h2><div id="board"></div></section>
   <section><h2>การตัดสินใจล่าสุดของ AI</h2><div id="dec"></div></section>
   <section><h2>ไม้ virtual ที่ปิดแล้ว</h2><div id="closed"></div></section>
   <div class="grid">
@@ -96,6 +97,7 @@ function render(s){
   document.getElementById('pos').innerHTML=s.ea.positions.length?tbl(['pair','dir','lot','P/L'], s.ea.positions.map(function(p){return '<tr><td>'+esc(p.s)+'</td><td>'+esc(p.d)+'</td><td>'+p.v+'</td><td class="'+cls(p.p)+'">'+p.p+'</td></tr>';})):'<div class="sub">ไม่มี (หรือ DRY RUN)</div>';
   document.getElementById('dec').innerHTML=tbl(['เวลา NY','pair','สัญญาณ','conf','ผล','เหตุผล'], s.decisions.filter(function(d){return d.action!=='NONE';}).slice(0,30).map(function(d){return '<tr><td>'+t(d.at)+'</td><td>'+d.sym+'</td><td class="'+(d.action==='BUY'?'up':'dn')+'">'+d.action+'</td><td>'+d.conf+'</td><td class="'+(d.taken?'up':'mut')+'">'+esc(d.taken?'ส่งคำสั่ง':d.note)+'</td><td class="why">'+esc(d.why)+'</td></tr>';}))+'<div class="sub">NONE ล่าสุด '+s.decisions.filter(function(d){return d.action==='NONE';}).length+' / '+s.decisions.length+' คำตอบ</div>';
   document.getElementById('closed').innerHTML=s.closed.length?tbl(['ปิด NY','book','pair','dir','conf','R','เหตุ'], s.closed.slice(0,30).map(function(c){return '<tr><td>'+t(c.closedAt)+'</td><td>'+c.book+'</td><td>'+c.sym+'</td><td>'+c.dir+'</td><td>'+c.conf+'</td><td class="'+cls(c.R)+'">'+c.R+'</td><td>'+c.reason+'</td></tr>';})):'<div class="sub">ยังไม่มี</div>';
+  document.getElementById('board').innerHTML=s.board&&s.board.length?tbl(['pair','ราคา','ATR (pip)','spread/ATR','AI ล่าสุด','conf','เวลา NY','virtual','หมายเหตุ'], s.board.map(function(b){var a=b.action||'-';return '<tr><td>'+b.sym+'</td><td>'+(b.price!=null?Number(b.price).toFixed(b.d):'-')+'</td><td>'+b.atrPips+'</td><td class="'+(b.sprAtr>0.15?'dn':'')+'">'+b.sprAtr+'</td><td class="'+(a==='BUY'?'up':a==='SELL'?'dn':'mut')+'">'+a+'</td><td>'+(b.conf==null?'-':b.conf)+'</td><td>'+t(b.at)+'</td><td class="'+(b.open==='BUY'?'up':b.open==='SELL'?'dn':'')+'">'+(b.open||'')+'</td><td class="why">'+esc(b.news?'ข่าว '+b.news:(b.why||''))+'</td></tr>';}))+'<div class="sub">ได้ข้อมูล '+s.board.length+' / 25 คู่ - AI ตอบทุกแท่ง M15 ที่ปิดในช่วง '+s.cfg.window+'</div>':'<div class="sub">ยังไม่มีข้อมูลแท่งจาก EA - รอแท่ง M15 ถัดไปปิด</div>';
   document.getElementById('feed').textContent=s.feed.join('\n');
   document.getElementById('acks').textContent=s.ea.acks.map(function(a){return t(a.at)+' #'+a.id+' '+a.st+' '+a.msg;}).join('\n')||'ยังไม่มี';
 }

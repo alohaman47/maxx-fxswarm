@@ -8,7 +8,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.0.3';
+const VERSION = 'v1.0.4';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -497,6 +497,14 @@ app.get('/api/state', auth, (req, res) => {
     news: { n: S.news.events.length, err: S.news.err, fetchedAt: S.news.fetchedAt,
       next: S.news.events.filter(e => e.at > Date.now()).sort((a, b) => a.at - b.at).slice(0, 5) },
     pairs: Object.keys(S.pairs).length,
+    board: Object.keys(S.pairs).sort().map(sym => {
+      const p = S.pairs[sym]; const last = p.bars[p.bars.length - 1] || {};
+      const d = S.decisions.find(x => x.sym === sym); const nw = newsFor(sym);
+      const pip = sym.includes('JPY') ? 0.01 : 0.0001;
+      return { sym, price: last.c, d: p.d, barT: last.t, atrPips: +(p.atr / pip).toFixed(1), sprAtr: p.atr ? +(p.spr / p.atr).toFixed(2) : 0,
+        action: d ? d.action : '', conf: d ? d.conf : null, why: d ? d.why : '', at: d ? d.at : 0,
+        open: S.books.AI[sym] ? (S.books.AI[sym].dir > 0 ? 'BUY' : 'SELL') : '', news: nw ? nw.ccy + ' ' + nw.title : '' };
+    }),
   });
 });
 app.post('/api/pause', auth, (req, res) => { S.paused = true; feed('[CTRL] paused'); save(); res.json({ ok: true }); });
