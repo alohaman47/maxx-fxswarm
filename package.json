@@ -1,0 +1,15 @@
+{
+  "name": "maxx-fxswarm",
+  "version": "1.0.0",
+  "description": "MAXX FX SWARM - AI signal server for 25 FX pairs with virtual books and calibration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
