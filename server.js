@@ -8,7 +8,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.0.4';
+const VERSION = 'v1.1.0';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -27,6 +27,7 @@ const CFG = {
   anthropicKey: env('ANTHROPIC_API_KEY', ''),
   anthropicModel: env('ANTHROPIC_MODEL', 'claude-haiku-5-5'),
   minConf: num('MIN_CONF', 80),
+  virtMinConf: num('VIRT_MIN_CONF', num('MIN_CONF', 80)), // threshold for virtual books (can be lower than real)
   batchSize: Math.max(1, Math.round(num('BATCH_SIZE', 5))),
   aiGapMs: num('AI_GAP_MS', 5000),
   aiDailyLimit: num('AI_DAILY_LIMIT', 900),
@@ -79,15 +80,18 @@ function aiWindowOpen() {
 
 // ---------------- state ----------------
 const newStats = () => ({ n: 0, w: 0, sumR: 0, gp: 0, gl: 0 });
+const BOOKS = ['AI', 'REV', 'RND', 'TRD'];
 const BUCKETS = ['<60', '60-69', '70-79', '80-89', '90+'];
 const bucketOf = (c) => c < 60 ? '<60' : c < 70 ? '60-69' : c < 80 ? '70-79' : c < 90 ? '80-89' : '90+';
 
 let S = {
   paused: false,
   pairs: {},                       // sym -> {d, atr, spr, bars:[{t,o,h,l,c}], lastT}
-  books: { AI: {}, REV: {} },      // sym -> open virtual trade
+  books: { AI: {}, REV: {}, RND: {}, TRD: {} }, // sym -> open virtual trade
   calibOpen: [],
-  stats: { AI: newStats(), REV: newStats(), calib: Object.fromEntries(BUCKETS.map(b => [b, newStats()])),
+  daily: {},                       // NY day -> book -> {n, sumR}
+  sigDaily: {},                    // NY day -> {asked, signals, taken}
+  stats: { AI: newStats(), REV: newStats(), RND: newStats(), TRD: newStats(), calib: Object.fromEntries(BUCKETS.map(b => [b, newStats()])),
     side: { BUY: newStats(), SELL: newStats() } },
   closed: [],
   decisions: [],
@@ -114,6 +118,8 @@ try {
   const raw = JSON.parse(fs.readFileSync(F('state.json'), 'utf8'));
   S = { ...S, ...raw, stats: { ...S.stats, ...(raw.stats || {}) } };
   for (const b of BUCKETS) if (!S.stats.calib[b]) S.stats.calib[b] = newStats();
+  for (const b of BOOKS) { if (!S.books[b]) S.books[b] = {}; if (!S.stats[b]) S.stats[b] = newStats(); }
+  if (!S.daily) S.daily = {}; if (!S.sigDaily) S.sigDaily = {};
   console.log('[BOOT] state restored');
 } catch { console.log('[BOOT] fresh state'); }
 
@@ -184,7 +190,11 @@ function closeVirtual(tr, price, reason) {
     R: +R.toFixed(3), reason, bars: tr.bars, openAt: tr.openAt, closedAt: Date.now() };
   const add = (st) => { st.n++; st.sumR += R; if (R > 0) { st.w++; st.gp += R; } else st.gl -= R; };
   if (tr.book === 'CAL') { add(S.stats.calib[bucketOf(tr.conf)]); add(S.stats.side[rec.dir]); }
-  else add(S.stats[tr.book]);
+  else {
+    add(S.stats[tr.book]);
+    const day = nyParts().day; const dd = S.daily[day] || (S.daily[day] = {});
+    const db = dd[tr.book] || (dd[tr.book] = { n: 0, sumR: 0 }); db.n++; db.sumR += R;
+  }
   if (tr.book !== 'CAL') { S.closed.unshift(rec); S.closed.length = Math.min(S.closed.length, 300); }
   appendJsonl('trades.jsonl', rec);
   return rec;
@@ -213,7 +223,7 @@ function stepVirtual(tr, b) {
 }
 function stepAllVirtual(sym, newBars) {
   for (const b of newBars) {
-    for (const book of ['AI', 'REV']) {
+    for (const book of BOOKS) {
       const tr = S.books[book][sym];
       if (tr && stepVirtual(tr, b)) delete S.books[book][sym];
     }
@@ -396,23 +406,36 @@ function handleSignals(syms, res) {
     const why = String(sig.why || '').slice(0, 120);
     const dec = { at: Date.now(), sym: s, action, conf, why, price: p.bars[p.bars.length - 1].c, taken: false, note: '' };
     S.ai.signals++;
+    const sd = S.sigDaily[nyParts().day] || (S.sigDaily[nyParts().day] = { asked: 0, signals: 0, taken: 0 });
+    sd.asked++;
+    if (action === 'BUY' || action === 'SELL') sd.signals++;
     if (action === 'BUY' || action === 'SELL') {
       const dir = action === 'BUY' ? 1 : -1;
       S.calibOpen.push(openVirtual('CAL', s, dir, conf, why, p));
       const nw = newsFor(s);
-      if (conf < CFG.minConf) dec.note = `conf < ${CFG.minConf}`;
+      if (conf < CFG.virtMinConf) dec.note = `conf < ${CFG.virtMinConf}`;
       else if (nw) dec.note = `news ${nw.ccy} ${nw.title}`;
       else if (S.paused) dec.note = 'paused';
       else {
-        for (const [book, d] of [['AI', dir], ['REV', -dir]]) {
+        // same moment, same pair, same exits - only the direction rule differs
+        const c20 = ema(p.bars.map(x => x.c), 20), c50 = ema(p.bars.map(x => x.c), 50);
+        const trendDir = c20[c20.length - 1] >= c50[c50.length - 1] ? 1 : -1;
+        const plan = [['AI', dir], ['REV', -dir], ['RND', null], ['TRD', trendDir]];
+        for (const [book, want] of plan) {
           const cur = S.books[book][s];
+          if (book === 'RND' && cur) continue;            // keep the coin's earlier trade
+          const d = want === null ? (Math.random() < 0.5 ? 1 : -1) : want;
           if (cur && cur.dir === d) continue;
           if (cur) { closeVirtual(cur, p.bars[p.bars.length - 1].c, 'FLIP'); delete S.books[book][s]; }
           S.books[book][s] = openVirtual(book, s, d, conf, why, p);
         }
+        if (conf < CFG.minConf) { dec.note = `virtual only (conf < ${CFG.minConf})`; feed(`[SIGNAL] ${s} ${action} conf ${conf} virtual only | ${why}`); }
+        else {
+        sd.taken++;
         const c = pushCmd('OPEN', s, action, conf);
         dec.taken = true; dec.note = `cmd #${c.id}`;
         feed(`[SIGNAL] ${s} ${action} conf ${conf} -> cmd #${c.id} | ${why}`);
+        }
       }
     }
     S.decisions.unshift(dec); S.decisions.length = Math.min(S.decisions.length, 300);
@@ -483,11 +506,14 @@ app.get('/api/state', auth, (req, res) => {
   const sum = (st) => ({ n: st.n, win: st.n ? +(100 * st.w / st.n).toFixed(1) : 0, pf: pf(st), sumR: +st.sumR.toFixed(2), avgR: st.n ? +(st.sumR / st.n).toFixed(3) : 0 });
   res.json({
     version: VERSION, provider: PROVIDER, model: MODEL, aiMode: PROVIDER === 'mock' ? 'mock' : 'live', paused: S.paused,
-    cfg: { minConf: CFG.minConf, batch: CFG.batchSize, window: `${CFG.aiStartNY}-${CFG.aiEndNY} NY`, aiLimit: CFG.aiDailyLimit,
+    cfg: { minConf: CFG.minConf, virtMinConf: CFG.virtMinConf, batch: CFG.batchSize, window: `${CFG.aiStartNY}-${CFG.aiEndNY} NY`, aiLimit: CFG.aiDailyLimit,
       exits: `SL ${CFG.slAtr} / BE ${CFG.beAtr} / trail ${CFG.trailStartAtr} (dist ${CFG.trailDistAtr}) / TP ${CFG.tpAtr} ATR / ${CFG.maxHoldBars} bars` },
     windowOpen: aiWindowOpen(), ny: nyParts(),
     ai: S.ai, ea: { ...S.ea, ageSec: S.ea.lastAt ? Math.round((Date.now() - S.ea.lastAt) / 1000) : null },
-    books: { AI: sum(S.stats.AI), REV: sum(S.stats.REV) },
+    books: Object.fromEntries(BOOKS.map(b => [b, sum(S.stats[b])])),
+    daily: Object.keys(S.daily).sort().reverse().slice(0, 14).map(day => ({ day, ...Object.fromEntries(BOOKS.map(b => [b, S.daily[day][b] ? { n: S.daily[day][b].n, sumR: +S.daily[day][b].sumR.toFixed(2) } : { n: 0, sumR: 0 }])) })),
+    dayScore: Object.fromEntries(BOOKS.map(b => { const days = Object.values(S.daily).map(d => d[b]).filter(x => x && x.n); return [b, { up: days.filter(x => x.sumR > 0).length, down: days.filter(x => x.sumR <= 0).length }]; })),
+    sigDaily: Object.keys(S.sigDaily).sort().reverse().slice(0, 14).map(day => ({ day, ...S.sigDaily[day] })),
     calib: BUCKETS.map(b => ({ bucket: b, ...sum(S.stats.calib[b]) })),
     side: { BUY: sum(S.stats.side.BUY), SELL: sum(S.stats.side.SELL) },
     open: Object.values(S.books.AI).map(t => ({ sym: t.sym, dir: t.dir > 0 ? 'BUY' : 'SELL', conf: t.conf, bars: t.bars,

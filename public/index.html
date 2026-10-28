@@ -46,9 +46,15 @@ pre{margin:0;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;col
   <div class="verdict" id="verdict">กำลังโหลด...</div>
   <div class="grid">
     <section><h2>AI book (ตามสัญญาณ)</h2><div id="sAI"></div></section>
-    <section><h2>REVERSE book (กลับฝั่ง)</h2><div id="sREV"></div></section>
-    <section><h2>AI วันนี้</h2><div id="sCalls"></div></section>
+    <section><h2>RANDOM (โยนเหรียญ จังหวะเดียวกัน)</h2><div id="sRND"></div></section>
+    <section><h2>TREND (EMA20/50 จังหวะเดียวกัน)</h2><div id="sTRD"></div></section>
+    <section><h2>REVERSE (กลับฝั่ง AI)</h2><div id="sREV"></div></section>
   </div>
+  <div class="grid">
+    <section><h2>AI วันนี้</h2><div id="sCalls"></div></section>
+    <section><h2>สัญญาณต่อวัน</h2><div id="sig"></div></section>
+  </div>
+  <section><h2>ผลรายวัน (R ต่อวัน - เชื่อถือได้กว่าจำนวนไม้ เพราะคู่เงินซ้อนกัน)</h2><div id="daily"></div></section>
   <section><h2>Calibration: ความมั่นใจ vs ผลจริง (ทุกสัญญาณ ไม่สนเกณฑ์)</h2><div id="calib"></div>
     <div class="sub">ถ้า AI มีตาจริง แถวความมั่นใจสูงต้องได้ avg R สูงกว่าแถวต่ำอย่างชัดเจน ถ้าทุกแถวพอๆ กัน = ตัวเลข conf ไม่มีความหมาย</div></section>
   <div class="grid">
@@ -71,7 +77,7 @@ var paused = false;
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function api(p, opt){opt=opt||{};opt.headers={'x-maxx-key':KEY};return fetch(p,opt).then(function(r){if(r.status===401){try{localStorage.removeItem('fxsw_key');}catch(e){} throw new Error('key ผิด - รีเฟรชแล้วใส่ใหม่');} return r.json();});}
 function cls(v){return v>0?'up':v<0?'dn':'mut';}
-function bookHtml(b){return '<div class="big '+cls(b.sumR)+'">'+(b.sumR>0?'+':'')+b.sumR+'R</div><div class="sub">n '+b.n+' | win '+b.win+'% | PF '+b.pf+' | avg '+b.avgR+'R</div>';}
+function bookHtml(b,ds){return '<div class="big '+cls(b.sumR)+'">'+(b.sumR>0?'+':'')+b.sumR+'R</div><div class="sub">n '+b.n+' | win '+b.win+'% | PF '+b.pf+' | avg '+b.avgR+'R'+(ds?'<br>วันบวก '+ds.up+' / วันลบ '+ds.down:'')+'</div>';}
 function tbl(head, rows){return '<table><tr>'+head.map(function(h){return '<th>'+h+'</th>';}).join('')+'</tr>'+rows.join('')+'</table>';}
 function t(ms){return ms?new Date(ms).toLocaleTimeString('th-TH',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit'}):'-';}
 function chip(id, txt, k){var e=document.getElementById(id);e.textContent=txt;e.className='chip '+(k||'');}
@@ -83,14 +89,17 @@ function render(s){
   chip('cWin', s.paused?'PAUSED':(s.windowOpen?'ช่วงถาม AI เปิด ('+s.cfg.window+')':'นอกช่วง ('+s.cfg.window+')'), s.paused?'bad':(s.windowOpen?'ok':''));
   var nx=s.news.next[0]; chip('cNews', s.news.err&&!s.news.n?'ปฏิทินข่าวโหลดไม่ได้':(nx?'ข่าว '+nx.ccy+' '+t(nx.at)+' NY':'ไม่มีข่าวแรงเร็วๆ นี้'), s.news.err&&!s.news.n?'bad':(nx?'warn':''));
   paused=s.paused; document.getElementById('bPause').textContent=paused?'Resume':'Pause';
-  document.getElementById('sAI').innerHTML=bookHtml(s.books.AI);
-  document.getElementById('sREV').innerHTML=bookHtml(s.books.REV);
+  ['AI','RND','TRD','REV'].forEach(function(k){document.getElementById('s'+k).innerHTML=bookHtml(s.books[k],s.dayScore&&s.dayScore[k]);});
+  var sg=s.sigDaily||[]; var avg=sg.length?(sg.reduce(function(a,d){return a+d.signals;},0)/sg.length).toFixed(1):'0';
+  document.getElementById('sig').innerHTML='<div class="big">'+avg+'<span class="sub"> สัญญาณ/วัน (เฉลี่ย)</span></div>'+tbl(['วัน','ถาม','BUY/SELL','ส่งคำสั่ง'],sg.slice(0,7).map(function(d){return '<tr><td>'+d.day+'</td><td>'+d.asked+'</td><td>'+d.signals+'</td><td>'+d.taken+'</td></tr>';}))+'<div class="sub">เกณฑ์ virtual '+s.cfg.virtMinConf+' / เกณฑ์ส่งคำสั่ง '+s.cfg.minConf+' - ถ้าเฉลี่ยต่ำกว่า 3/วัน หลัง 3 วัน ค่อยลดเกณฑ์ virtual</div>';
+  var dl=s.daily||[]; document.getElementById('daily').innerHTML=dl.length?tbl(['วัน NY','AI','RANDOM','TREND','REVERSE'],dl.map(function(d){return '<tr><td>'+d.day+'</td>'+['AI','RND','TRD','REV'].map(function(k){var x=d[k];return '<td class="'+cls(x.sumR)+'">'+(x.n?(x.sumR>0?'+':'')+x.sumR+'R ('+x.n+')':'-')+'</td>';}).join('')+'</tr>';})):'<div class="sub">ยังไม่มีไม้ที่ปิด</div>';
   document.getElementById('sCalls').innerHTML='<div class="big">'+s.ai.calls+'<span class="sub"> / '+s.cfg.aiLimit+' calls</span></div><div class="sub">error '+s.ai.errors+' | สัญญาณสะสม '+s.ai.signals+' | min conf '+s.cfg.minConf+'<br>'+esc(s.cfg.exits)+(s.ai.lastErr?'<br><span class="dn">'+esc(s.ai.lastErr)+'</span>':'')+'</div>';
-  var A=s.books.AI, R=s.books.REV, v;
-  if (A.n<60) v='ยังตัดสินไม่ได้: AI book มี '+A.n+' ไม้ (ต้องการอย่างน้อย 60 และควร 100+) - ห้ามเปิด LIVE จนกว่าจะผ่าน';
-  else if (A.pf>1.2 && A.sumR>R.sumR) v='AI book ผ่านเกณฑ์เบื้องต้น (PF '+A.pf+' > 1.2 และชนะ REVERSE) - เช็ค calibration ด้วยก่อนเปิด LIVE lot เล็ก';
-  else if (R.pf>1.2 && R.sumR>A.sumR) v='REVERSE ดีกว่า AI อย่างมีนัย - อย่ารีบกลับฝั่ง ให้เก็บต่ออีก 60 ไม้ ถ้ายังเหมือนเดิมค่อยคุยกัน';
-  else v='ยังไม่มี edge: AI PF '+A.pf+' vs REVERSE PF '+R.pf+' - เหรียญหัวก้อยยังไม่แพ้ AI';
+  var A=s.books.AI, R=s.books.REV, N=s.books.RND, T=s.books.TRD, v, nd=(s.dayScore&&s.dayScore.AI)?s.dayScore.AI.up+s.dayScore.AI.down:0;
+  if (A.n<60 || nd<10) v='ยังตัดสินไม่ได้: AI book มี '+A.n+' ไม้ / '+nd+' วันเทรด (ต้องการอย่างน้อย 60 ไม้ และ 10 วัน) - ห้ามเปิด LIVE จนกว่าจะผ่าน';
+  else if (A.pf>1.2 && A.sumR>N.sumR && A.sumR>T.sumR) v='AI ผ่านเกณฑ์เบื้องต้น: PF '+A.pf+' และชนะทั้ง RANDOM ('+N.sumR+'R) และ TREND ('+T.sumR+'R) - เช็ค calibration + ผลรายวันด้วยกันก่อนเปิด LIVE lot เล็ก';
+  else if (A.sumR>N.sumR && T.sumR>=A.sumR) v='AI ชนะเหรียญแต่ไม่ชนะ EMA ธรรมดา - ไม่คุ้มจ่ายค่า AI ใช้กฎ TREND ถูกกว่า';
+  else if (R.pf>1.2 && R.sumR>A.sumR) v='REVERSE ดีกว่า AI อย่างมีนัย - อย่ารีบกลับฝั่ง เก็บต่ออีก 60 ไม้ ถ้ายังเหมือนเดิมค่อยคุยกัน';
+  else v='ยังไม่มี edge: AI '+A.sumR+'R vs RANDOM '+N.sumR+'R vs TREND '+T.sumR+'R - AI ยังไม่ชนะการโยนเหรียญ';
   document.getElementById('verdict').textContent=v;
   document.getElementById('calib').innerHTML=tbl(['conf','n','win%','avg R','sum R','PF'], s.calib.map(function(c){return '<tr><td>'+c.bucket+'</td><td>'+c.n+'</td><td>'+c.win+'</td><td class="'+cls(c.avgR)+'">'+c.avgR+'</td><td class="'+cls(c.sumR)+'">'+c.sumR+'</td><td>'+c.pf+'</td></tr>';}).concat(['BUY','SELL'].map(function(k){var c=s.side[k];return '<tr><td class="mut">all '+k+'</td><td>'+c.n+'</td><td>'+c.win+'</td><td class="'+cls(c.avgR)+'">'+c.avgR+'</td><td class="'+cls(c.sumR)+'">'+c.sumR+'</td><td>'+c.pf+'</td></tr>';})));
   document.getElementById('open').innerHTML=s.open.length?tbl(['pair','dir','conf','bars','R ตอนนี้'], s.open.map(function(o){return '<tr><td>'+o.sym+'</td><td class="'+(o.dir==='BUY'?'up':'dn')+'">'+o.dir+'</td><td>'+o.conf+'</td><td>'+o.bars+'</td><td class="'+cls(o.R)+'">'+o.R+'</td></tr>';})):'<div class="sub">ไม่มี</div>';
