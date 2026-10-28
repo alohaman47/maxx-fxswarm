@@ -8,7 +8,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.0.1';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -19,7 +19,7 @@ const CFG = {
   dataDir: env('DATA_DIR', path.join(__dirname, 'data')),
   provider: env('AI_PROVIDER', 'auto'), // auto | gemini | openai | anthropic | mock
   geminiKeys: list('GEMINI_KEYS').concat(list('GEMINI_API_KEY')),
-  geminiModel: env('GEMINI_MODEL', 'gemini-2.5-flash-lite'),
+  geminiModel: env('GEMINI_MODEL', 'auto'), // auto = pick newest free Flash-Lite from Google's model list
   openaiKeys: list('OPENAI_KEYS'),
   openaiBase: env('OPENAI_BASE_URL', 'https://api.groq.com/openai/v1'),
   openaiModel: env('OPENAI_MODEL', 'llama-3.3-70b-versatile'),
@@ -55,7 +55,7 @@ function pickProvider() {
   return 'mock';
 }
 const PROVIDER = pickProvider();
-const MODEL = PROVIDER === 'gemini' ? CFG.geminiModel : PROVIDER === 'openai' ? CFG.openaiModel
+let MODEL = PROVIDER === 'gemini' ? CFG.geminiModel : PROVIDER === 'openai' ? CFG.openaiModel
   : PROVIDER === 'anthropic' ? CFG.anthropicModel : 'mock-rule';
 
 fs.mkdirSync(CFG.dataDir, { recursive: true });
@@ -251,15 +251,36 @@ function extractJson(text) {
   if (a < 0 || b <= a) throw new Error('no JSON in reply');
   return JSON.parse(text.slice(a, b + 1));
 }
+
+// Gemini model auto-pick: Google retires model names often, so ask the API which models exist
+let geminiModel = CFG.geminiModel === 'auto' ? '' : CFG.geminiModel;
+async function resolveGeminiModel(force) {
+  if (PROVIDER !== 'gemini') return;
+  if (geminiModel && !force) return;
+  const key = CFG.geminiKeys[0];
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(key)}`);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`gemini list models http ${r.status} ${(j.error && j.error.message || '').slice(0, 200)}`);
+  const names = (j.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map(m => String(m.name).replace(/^models\//, ''))
+    .filter(n => /^gemini-[\d.]+-flash/.test(n) && !/(image|tts|audio|live|thinking|exp|native|embedding|computer)/.test(n));
+  const ver = (n) => parseFloat((n.match(/^gemini-([\d.]+)/) || [0, 0])[1]) || 0;
+  const score = (n) => ver(n) * 100 + (/flash-lite/.test(n) ? 20 : 0) + (/preview/.test(n) ? 0 : 5) - (/-\d{3,}$/.test(n) ? 1 : 0);
+  names.sort((a, b) => score(b) - score(a));
+  if (!names.length) throw new Error('no Gemini flash model available for this key');
+  const old = geminiModel; geminiModel = names[0]; MODEL = geminiModel;
+  feed(`[AI] Gemini model -> ${geminiModel}${old ? ' (was ' + old + ')' : ''} | candidates: ${names.slice(0, 5).join(', ')}`);
+}
 async function callOnce(prompt, key) {
   if (PROVIDER === 'gemini') {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${CFG.geminiModel}:generateContent?key=${encodeURIComponent(key)}`;
+    if (!geminiModel) await resolveGeminiModel();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${encodeURIComponent(key)}`;
     const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       systemInstruction: { parts: [{ text: SYS }] },
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.2, maxOutputTokens: 2048, responseMimeType: 'application/json' } }) });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) { const e = new Error(`gemini http ${r.status} ${(j.error && j.error.message || '').slice(0, 120)}`); e.status = r.status; throw e; }
+    if (!r.ok) { const e = new Error(`gemini http ${r.status} ${(j.error && j.error.message || '').slice(0, 300)}`); e.status = r.status; throw e; }
     const parts = (((j.candidates || [])[0] || {}).content || {}).parts || [];
     return parts.map(p => p.text || '').join('');
   }
@@ -312,6 +333,9 @@ async function askAI(syms) {
       lastErr = e;
       console.error('[AI ERROR]', e.message);
       if (e.status === 429 || (e.status >= 500)) { S.ai.keyIdx++; await sleep(2500); continue; }
+      if (PROVIDER === 'gemini' && e.status === 404 && attempt === 0) {
+        try { await resolveGeminiModel(true); continue; } catch (e2) { lastErr = e2; console.error('[AI ERROR]', e2.message); }
+      }
       break;
     }
   }
@@ -483,6 +507,7 @@ if (require.main === module) {
   });
   try { S.news = JSON.parse(fs.readFileSync(F('news.json'), 'utf8')); } catch {}
   if (Date.now() - (S.news.fetchedAt || 0) > 6 * 3600e3) fetchNews();
+  resolveGeminiModel().catch(e => { S.ai.lastErr = e.message.slice(0, 300); feed(`[AI ERROR] ${S.ai.lastErr}`); });
   setInterval(fetchNews, 12 * 3600e3);
   setInterval(save, 60e3);
 }
