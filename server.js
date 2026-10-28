@@ -8,7 +8,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.0.2';
+const VERSION = 'v1.0.3';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -254,6 +254,7 @@ function extractJson(text) {
 
 // Gemini model auto-pick: Google retires model names often, so ask the API which models exist
 let geminiModel = CFG.geminiModel === 'auto' ? '' : CFG.geminiModel;
+let geminiCands = []; const geminiBad = {}; // model -> blocked-until ms
 async function resolveGeminiModel(force) {
   if (PROVIDER !== 'gemini') return;
   if (geminiModel && !force) return;
@@ -265,10 +266,13 @@ async function resolveGeminiModel(force) {
     .map(m => String(m.name).replace(/^models\//, ''))
     .filter(n => /^gemini-[\d.]+-flash/.test(n) && !/(image|tts|audio|live|thinking|exp|native|embedding|computer)/.test(n));
   const ver = (n) => parseFloat((n.match(/^gemini-([\d.]+)/) || [0, 0])[1]) || 0;
-  const score = (n) => ver(n) * 100 + (/flash-lite/.test(n) ? 20 : 0) + (/preview/.test(n) ? 0 : 5) - (/-\d{3,}$/.test(n) ? 1 : 0);
+  const score = (n) => (/flash-lite/.test(n) ? 10000 : 0) + ver(n) * 100 + (/preview/.test(n) ? 0 : 5) - (/-\d{3,}$/.test(n) ? 1 : 0);
   names.sort((a, b) => score(b) - score(a));
   if (!names.length) throw new Error('no Gemini flash model available for this key');
-  const old = geminiModel; geminiModel = names[0]; MODEL = geminiModel;
+  geminiCands = names;
+  const usable = names.filter(n => !(geminiBad[n] > Date.now()));
+  if (!usable.length) throw new Error('all Gemini models out of free quota - wait for daily reset (midnight Pacific) or add another key');
+  const old = geminiModel; geminiModel = usable[0]; MODEL = geminiModel;
   feed(`[AI] Gemini model -> ${geminiModel}${old ? ' (was ' + old + ')' : ''} | candidates: ${names.slice(0, 5).join(', ')}`);
 }
 async function callOnce(prompt, key) {
@@ -321,7 +325,7 @@ async function askAI(syms) {
   if (PROVIDER === 'mock') { S.ai.calls++; return extractJson(mockAnswer(syms)); }
   const keys = PROVIDER === 'gemini' ? CFG.geminiKeys : PROVIDER === 'openai' ? CFG.openaiKeys : [CFG.anthropicKey];
   let lastErr;
-  for (let attempt = 0; attempt < keys.length + 1; attempt++) {
+  for (let attempt = 0; attempt < keys.length + 4; attempt++) {
     const key = keys[S.ai.keyIdx % keys.length];
     try {
       S.ai.calls++;
@@ -332,6 +336,11 @@ async function askAI(syms) {
     } catch (e) {
       lastErr = e;
       console.error('[AI ERROR]', e.message);
+      if (PROVIDER === 'gemini' && e.status === 429 && /quota/i.test(e.message) && keys.length === 1) {
+        // free quota for this model is gone (or zero) -> park it 6h and try the next model
+        geminiBad[geminiModel] = Date.now() + 6 * 3600e3;
+        try { await resolveGeminiModel(true); continue; } catch (e2) { lastErr = e2; console.error('[AI ERROR]', e2.message); break; }
+      }
       if (e.status === 429 || (e.status >= 500)) { S.ai.keyIdx++; await sleep(2500); continue; }
       if (PROVIDER === 'gemini' && e.status === 404 && attempt === 0) {
         try { await resolveGeminiModel(true); continue; } catch (e2) { lastErr = e2; console.error('[AI ERROR]', e2.message); }
