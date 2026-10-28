@@ -8,7 +8,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.0.1';
+const VERSION = 'v1.0.2';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -16,7 +16,7 @@ const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Bool
 const CFG = {
   port: num('PORT', 3000),
   key: env('MAXX_KEY', ''),
-  dataDir: env('DATA_DIR', path.join(__dirname, 'data')),
+  dataDir: env('DATA_DIR', env('RAILWAY_VOLUME_MOUNT_PATH', path.join(__dirname, 'data'))),
   provider: env('AI_PROVIDER', 'auto'), // auto | gemini | openai | anthropic | mock
   geminiKeys: list('GEMINI_KEYS').concat(list('GEMINI_API_KEY')),
   geminiModel: env('GEMINI_MODEL', 'auto'), // auto = pick newest free Flash-Lite from Google's model list
@@ -423,7 +423,7 @@ const auth = (req, res, next) => {
 
 app.get('/health', (req, res) => res.json({ ok: true, version: VERSION, aiMode: PROVIDER === 'mock' ? 'mock' : 'live',
   provider: PROVIDER, model: MODEL, keys: PROVIDER === 'gemini' ? CFG.geminiKeys.length : PROVIDER === 'openai' ? CFG.openaiKeys.length : PROVIDER === 'anthropic' ? 1 : 0,
-  keySet: !!CFG.key, newsEvents: S.news.events.length, eaAgeSec: S.ea.lastAt ? Math.round((Date.now() - S.ea.lastAt) / 1000) : null }));
+  keySet: !!CFG.key, dataDir: CFG.dataDir, newsEvents: S.news.events.length, eaAgeSec: S.ea.lastAt ? Math.round((Date.now() - S.ea.lastAt) / 1000) : null }));
 
 // EA -> closed bars for all pairs
 app.post('/api/bar', auth, (req, res) => {
