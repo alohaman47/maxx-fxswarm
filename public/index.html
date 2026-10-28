@@ -26,6 +26,8 @@ td.why{white-space:normal;min-width:200px}
 button{background:#2f3642;color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:8px 14px;font-size:15px;cursor:pointer}
 button.danger{border-color:var(--dn);color:var(--dn)}
 pre{margin:0;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;color:#dbe2ee}
+.clock{font:600 17px ui-monospace,Menlo,monospace;padding:4px 10px;border-radius:8px;background:var(--card);border:1px solid var(--line)}
+.clock .mut{font-size:13px}
 .verdict{font-size:16px;padding:10px;border-radius:8px;background:#1f242c;border-left:4px solid var(--warn)}
 </style>
 </head>
@@ -39,6 +41,8 @@ pre{margin:0;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;col
   <span class="chip" id="cWin">...</span>
   <span class="chip" id="cNews">news ...</span>
   <span style="flex:1"></span>
+  <span class="clock"><span class="mut">NY</span> <b id="tNY">--:--:--</b></span>
+  <span class="clock"><span class="mut">UTC</span> <b id="tUTC">--:--:--</b></span>
   <button id="bPause">Pause</button>
   <button class="danger" id="bClose">ปิดทุกไม้</button>
 </header>
@@ -113,6 +117,10 @@ function render(s){
 function load(){api('/api/state').then(render).catch(function(e){document.getElementById('verdict').textContent='โหลดไม่ได้: '+e.message;});}
 document.getElementById('bPause').onclick=function(){api(paused?'/api/resume':'/api/pause',{method:'POST'}).then(load);};
 document.getElementById('bClose').onclick=function(){if(confirm('ส่งคำสั่งปิดทุกไม้ของบอทนี้?'))api('/api/closeall',{method:'POST'}).then(load);};
+function tick(){var d=new Date();var o={hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false};
+  document.getElementById('tNY').textContent=d.toLocaleTimeString('en-GB',Object.assign({timeZone:'America/New_York'},o));
+  document.getElementById('tUTC').textContent=d.toLocaleTimeString('en-GB',Object.assign({timeZone:'UTC'},o));}
+tick(); setInterval(tick, 1000);
 load(); setInterval(load, 10000);
 </script>
 </body>
