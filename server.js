@@ -9,7 +9,7 @@ const TECH = require('./techniques');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.5.0';
+const VERSION = 'v1.6.0';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -357,12 +357,16 @@ async function askAI(syms) {
   if (S.ai.calls >= CFG.aiDailyLimit) throw new Error('daily AI limit reached');
   const prompt = buildPrompt(syms);
   if (PROVIDER === 'mock') { S.ai.calls++; return extractJson(mockAnswer(syms)); }
+  return askPrompt(prompt, S.ai);
+}
+// one AI call with key rotation / retries; `ctr` = counter object ({calls, keyIdx})
+async function askPrompt(prompt, ctr) {
   const keys = PROVIDER === 'gemini' ? CFG.geminiKeys : PROVIDER === 'openai' ? CFG.openaiKeys : [CFG.anthropicKey];
   let lastErr;
   for (let attempt = 0; attempt < keys.length + 4; attempt++) {
-    const key = keys[S.ai.keyIdx % keys.length];
+    const key = keys[(S.ai.keyIdx || 0) % keys.length];
     try {
-      S.ai.calls++;
+      ctr.calls = (ctr.calls || 0) + 1;
       const text = await callOnce(prompt, key);
       if (!text.trim()) throw Object.assign(new Error('empty reply'), { status: 599 });
       S.ai.keyIdx++; // round-robin across keys
@@ -371,13 +375,13 @@ async function askAI(syms) {
     } catch (e) {
       lastErr = e;
       console.error('[AI ERROR]', e.message);
-      if (PROVIDER === 'gemini' && e.status === 429 && /quota/i.test(e.message) && keys.length === 1) {
+      if (PROVIDER === 'gemini' && e.status === 429 && /quota/i.test(e.message) && keys.length === 1 && !ctr.noPark) {
         // free quota for this model is gone (or zero) -> park it 6h and try the next model
         geminiBad[geminiModel] = Date.now() + 6 * 3600e3;
         try { await resolveGeminiModel(true); continue; } catch (e2) { lastErr = e2; console.error('[AI ERROR]', e2.message); break; }
       }
       if (e.status === 598 && attempt < 2) { await sleep(1000); continue; }   // malformed JSON -> ask again
-      if (e.status === 429 || (e.status >= 500)) { S.ai.keyIdx++; await sleep(2500); continue; }
+      if (e.status === 429 || (e.status >= 500)) { S.ai.keyIdx++; await sleep(ctr.noPark && e.status === 429 ? 15000 : 2500); continue; }
       if (PROVIDER === 'gemini' && e.status === 404 && attempt === 0) {
         try { await resolveGeminiModel(true); continue; } catch (e2) { lastErr = e2; console.error('[AI ERROR]', e2.message); }
       }
@@ -480,6 +484,41 @@ function runTech(sym) {
   }
 }
 
+// ---------------- replay: AI on historical, anonymized charts ----------------
+const REPLAY_FILE = path.join(__dirname, 'replay', 'replay_set.json');
+const REPLAY_OUT = F('replay_results.jsonl');
+const RP = { noPark: true, running: false, total: 0, done: 0, errors: 0, calls: 0, startedAt: 0, lastErr: '', stopReq: false };
+function replayDoneIds() {
+  const ids = new Set();
+  try { for (const ln of fs.readFileSync(REPLAY_OUT, 'utf8').split('\n')) { if (!ln) continue; const o = JSON.parse(ln); if (o.ok) ids.add(o.id); } } catch {}
+  return ids;
+}
+async function replayLoop() {
+  let set; try { set = JSON.parse(fs.readFileSync(REPLAY_FILE, 'utf8')); } catch (e) { RP.lastErr = 'no replay set: ' + e.message; RP.running = false; return; }
+  const done = replayDoneIds();
+  RP.total = set.calls.length; RP.done = done.size; RP.startedAt = Date.now(); RP.stopReq = false;
+  feed(`[REPLAY] start ${RP.done}/${RP.total} already done`);
+  const gap = num('REPLAY_GAP_MS', 1200);
+  for (const c of set.calls) {
+    if (RP.stopReq) break;
+    if (done.has(c.id)) continue;
+    try {
+      let res;
+      if (PROVIDER === 'mock') res = { signals: c.items.map(it => ({ pair: it.k, action: 'NONE', conf: 50, why: 'mock' })) };
+      else res = await askPrompt(c.prompt, RP);
+      appendJsonl('replay_results.jsonl', { id: c.id, ok: true, at: Date.now(), model: MODEL, signals: Array.isArray(res.signals) ? res.signals : [] });
+      RP.done++;
+    } catch (e) {
+      RP.errors++; RP.lastErr = e.message.slice(0, 200);
+      appendJsonl('replay_results.jsonl', { id: c.id, ok: false, at: Date.now(), err: RP.lastErr });
+      if (RP.errors > 50 && RP.errors > RP.done) { feed('[REPLAY] too many errors, stopped'); break; }
+    }
+    await sleep(gap);
+  }
+  RP.running = false;
+  feed(`[REPLAY] ${RP.stopReq ? 'stopped' : 'finished'} ${RP.done}/${RP.total}, errors ${RP.errors}`);
+}
+
 // ---------------- HTTP ----------------
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -578,6 +617,18 @@ app.get('/api/state', auth, (req, res) => {
 app.post('/api/pause', auth, (req, res) => { S.paused = true; feed('[CTRL] paused'); save(); res.json({ ok: true }); });
 app.post('/api/resume', auth, (req, res) => { S.paused = false; feed('[CTRL] resumed'); save(); res.json({ ok: true }); });
 app.post('/api/closeall', auth, (req, res) => { const c = pushCmd('CLOSEALL', '*', '-', 0); feed(`[CTRL] close-all cmd #${c.id}`); save(); res.json({ ok: true, id: c.id }); });
+app.post('/api/replay/start', auth, (req, res) => { RP.stopReq = false; if (!RP.running) { RP.running = true; replayLoop().catch(e => { RP.running = false; RP.lastErr = e.message; }); } res.json({ ok: true }); });
+app.post('/api/replay/stop', auth, (req, res) => { RP.stopReq = true; res.json({ ok: true }); });
+app.get('/api/replay/status', auth, (req, res) => {
+  let total = RP.total; if (!total) { try { total = JSON.parse(fs.readFileSync(REPLAY_FILE, 'utf8')).calls.length; } catch {} }
+  const done = RP.running ? RP.done : replayDoneIds().size;
+  const rate = RP.running && RP.startedAt ? RP.calls / ((Date.now() - RP.startedAt) / 60000) : 0;
+  res.json({ running: RP.running, total, done, errors: RP.errors, lastErr: RP.lastErr, perMin: +rate.toFixed(1), model: MODEL });
+});
+app.get('/api/replay/results', auth, (req, res) => {
+  res.setHeader('Content-Disposition', 'attachment; filename="replay_results.jsonl"');
+  try { res.type('text/plain').send(fs.readFileSync(REPLAY_OUT, 'utf8')); } catch { res.type('text/plain').send(''); }
+});
 app.get('/api/log', auth, (req, res) => {
   const name = { trades: 'trades.jsonl', decisions: 'decisions.jsonl', acks: 'acks.jsonl' }[req.query.f] || 'decisions.jsonl';
   try { res.type('text/plain').send(fs.readFileSync(F(name), 'utf8')); } catch { res.type('text/plain').send(''); }
@@ -596,4 +647,4 @@ if (require.main === module) {
   setInterval(fetchNews, 12 * 3600e3);
   setInterval(save, 60e3);
 }
-module.exports = { app, S, CFG };
+module.exports = { app, S, CFG, features };

@@ -48,6 +48,10 @@ pre{margin:0;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;col
 </header>
 <main>
   <div class="verdict" id="verdict">กำลังโหลด...</div>
+  <section><h2>ข้อสอบย้อนหลัง: AI อ่านกราฟปี 2024-2026 แบบซ่อนชื่อคู่ (1,600 ครั้ง / 8,000 คำตอบ)</h2>
+    <div id="rp" class="sub">...</div>
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button id="rpStart">เริ่ม / ทำต่อ</button><button id="rpStop">หยุด</button><a id="rpDl" href="#"><button>ดาวน์โหลดคำตอบ</button></a></div>
+    <div class="sub" style="margin-top:6px">ไม่กระทบระบบสด (ไม่นับโควต้ารายวันของ AI สด) - หยุดแล้วกดเริ่มใหม่จะทำต่อจากเดิม - เสร็จแล้วกดดาวน์โหลดส่งไฟล์ให้ Claude</div></section>
   <div class="grid">
     <section><h2>AI book (ตามสัญญาณ)</h2><div id="sAI"></div></section>
     <section><h2>RANDOM (โยนเหรียญ จังหวะเดียวกัน)</h2><div id="sRND"></div></section>
@@ -130,6 +134,12 @@ function tick(){var d=new Date();var o={hour:'2-digit',minute:'2-digit',second:'
   document.getElementById('tNY').textContent=d.toLocaleTimeString('en-GB',Object.assign({timeZone:'America/New_York'},o));
   document.getElementById('tUTC').textContent=d.toLocaleTimeString('en-GB',Object.assign({timeZone:'UTC'},o));}
 tick(); setInterval(tick, 1000);
+function rpLoad(){api('/api/replay/status').then(function(r){var pct=r.total?Math.round(100*r.done/r.total):0;var eta=r.running&&r.perMin>0?Math.round((r.total-r.done)/r.perMin):null;
+  document.getElementById('rp').innerHTML='<b>'+(r.running?'กำลังรัน':'หยุดอยู่')+'</b> | เสร็จ '+r.done+' / '+r.total+' ('+pct+'%) | error '+r.errors+(r.perMin?' | '+r.perMin+' ครั้ง/นาที':'')+(eta!=null?' | เหลือประมาณ '+eta+' นาที':'')+(r.lastErr?'<br><span class="dn">'+esc(r.lastErr)+'</span>':'');}).catch(function(){});}
+document.getElementById('rpStart').onclick=function(){api('/api/replay/start',{method:'POST'}).then(rpLoad);};
+document.getElementById('rpStop').onclick=function(){api('/api/replay/stop',{method:'POST'}).then(rpLoad);};
+document.getElementById('rpDl').href='/api/replay/results?key='+encodeURIComponent(KEY);
+rpLoad(); setInterval(rpLoad, 10000);
 load(); setInterval(load, 10000);
 </script>
 </body>

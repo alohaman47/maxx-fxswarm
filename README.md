@@ -70,3 +70,9 @@ AI ตัวอื่นแทน Gemini ได้: `AI_PROVIDER=openai` + `OPEN
 1. MT5: รันสคริปต์ `mt5/MAXX_FXSWARM_EXPORT_v1.mq5` → ไฟล์อยู่ใน `MQL5/Files/FXSWARM/`
 2. `node backtest.js <โฟลเดอร์ csv> --split 2026-01-01 --offset 7 --comm 0.7`
 เกณฑ์ผ่าน: IS n ≥ 100, avg R > 0, t รายวัน ≥ 2.5, OOS n ≥ 50 และ avg R > 0, ทุกปีเป็นบวก
+
+## ข้อสอบย้อนหลังของ AI (v1.6.0)
+`replay/replay_set.json` = 1,600 จังหวะสุ่มจากปี 2024-2026 × 5 คู่ = 8,000 คำถาม ซ่อนชื่อคู่ (ASSET_1-5), ไม่บอกวันที่ (บอกแค่วันในสัปดาห์+เวลา NY), ปรับราคาให้แท่งล่าสุด = 1000.00 กัน AI จำราคาในอดีต
+- Dashboard ปุ่ม "เริ่ม / ทำต่อ" → server ถาม AI ทีละชุด (`REPLAY_GAP_MS`, default 1200) ไม่นับโควต้ารายวันของระบบสด และไม่สลับโมเดลของระบบสด
+- เสร็จแล้วกด "ดาวน์โหลดคำตอบ" → `node tools/score_replay.js <csv folder> replay_results.jsonl`
+- สร้างชุดใหม่: `node tools/gen_replay.js <csv folder> --calls 1600 --seed 7`
