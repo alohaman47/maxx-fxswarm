@@ -9,7 +9,7 @@ const TECH = require('./techniques');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.6.0';
+const VERSION = 'v1.7.0';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -116,6 +116,8 @@ let S = {
   feed: [],
   news: { events: [], fetchedAt: 0, err: '' },
   tradeSeq: 0,
+  watch: {},
+  sess: {},
 };
 function feed(msg) {
   const line = `${new Date().toISOString().slice(11, 19)}Z ${msg}`;
@@ -136,6 +138,7 @@ try {
   for (const b of BOOKS) { if (!S.books[b]) S.books[b] = {}; if (!S.stats[b]) S.stats[b] = newStats(); }
   if (!S.daily) S.daily = {}; if (!S.sigDaily) S.sigDaily = {};
   if (!S.sess) S.sess = {};
+  if (!S.watch) S.watch = {};
   console.log('[BOOT] state restored');
 } catch { console.log('[BOOT] fresh state'); }
 
@@ -519,6 +522,53 @@ async function replayLoop() {
   feed(`[REPLAY] ${RP.stopReq ? 'stopped' : 'finished'} ${RP.done}/${RP.total}, errors ${RP.errors}`);
 }
 
+// ---------------- forward-test watcher (CENTAUR etc, read-only) ----------------
+const WATCH_FAIL_DD = num('WATCH_FAIL_DD', 12);
+function watchStats(w) {
+  const deals = (w.deals || []).slice().sort((a, b) => a.t - b.t);
+  const net = (d) => (+d.pl || 0) + (+d.sw || 0) + (+d.cm || 0);
+  // realized balance curve + DD
+  let bal = w.startBal || 10000, peak = bal, dd = 0; const daily = {};
+  for (const d of deals) { bal += net(d); if (bal > peak) peak = bal; dd = Math.max(dd, peak > 0 ? (peak - bal) / peak * 100 : 0); daily[Math.floor(d.t / 86400)] = bal; }
+  // trades by position id
+  const pos = {};
+  for (const d of deals) { const p = pos[d.pos] || (pos[d.pos] = { net: 0, tin: 0, tout: 0, dir: '', v: 0 });
+    p.net += net(d); if (d.e === 'in' && !p.tin) { p.tin = d.t; p.dir = d.d; p.v = d.v; } if (d.e !== 'in') p.tout = d.t; }
+  const trades = Object.values(pos).filter(p => p.tin && p.tout);
+  const gp = trades.filter(t => t.net > 0).reduce((a, t) => a + t.net, 0), gl = -trades.filter(t => t.net <= 0).reduce((a, t) => a + t.net, 0);
+  const holds = trades.map(t => (t.tout - t.tin) / 60);
+  const ins = deals.filter(d => d.e === 'in');
+  const hourCnt = {}; for (const d of ins) { const h = Math.floor(d.t / 3600) % 24; hourCnt[h] = (hourCnt[h] || 0) + 1; }
+  const topHour = Object.entries(hourCnt).sort((a, b) => b[1] - a[1])[0];
+  const daysTraded = new Set(ins.map(d => Math.floor(d.t / 86400))).size;
+  let weekdays = 0; for (let day = Math.floor(w.start / 86400); day <= Math.floor(w.now / 86400); day++) { const wd = new Date(day * 86400e3).getUTCDay(); if (wd >= 1 && wd <= 5) weekdays++; }
+  const lastIn = ins.length ? ins[ins.length - 1].t : 0;
+  const nowWd = new Date(w.now * 1000).getUTCDay();
+  const silentH = lastIn ? (w.now - lastIn) / 3600 : null;
+  // equity DD from samples (account level, since the watcher started)
+  let ePeak = 0, eDD = 0; for (const x of (w.eq || [])) { if (x.e > ePeak) ePeak = x.e; if (ePeak > 0) eDD = Math.max(eDD, (ePeak - x.e) / ePeak * 100); }
+  const flags = [];
+  if (dd > WATCH_FAIL_DD) flags.push({ lvl: 'fail', msg: `DD ตามไม้ปิด ${dd.toFixed(1)}% เกินเส้นตก ${WATCH_FAIL_DD}%` });
+  if (eDD > WATCH_FAIL_DD) flags.push({ lvl: 'fail', msg: `Equity DD ${eDD.toFixed(1)}% เกินเส้นตก ${WATCH_FAIL_DD}%` });
+  if (silentH !== null && silentH > 30 && nowWd >= 1 && nowWd <= 5) flags.push({ lvl: 'fail', msg: `ไม่มีไม้ใหม่ ${silentH.toFixed(0)} ชม. - EA หยุดหรือเครื่องดับ?` });
+  if (weekdays >= 5 && daysTraded / weekdays < 0.9) flags.push({ lvl: 'warn', msg: `เทรด ${daysTraded}/${weekdays} วันทำการ (ต่ำกว่า 90%)` });
+  if (topHour && ins.length >= 10 && topHour[1] / ins.length < 0.8) flags.push({ lvl: 'warn', msg: `เวลาเข้าไม้ไม่คงที่ (ชั่วโมงหลัก ${topHour[0]}:00 แค่ ${(100 * topHour[1] / ins.length).toFixed(0)}%)` });
+  return {
+    label: w.label, magic: w.magic, acct: w.acct, demo: w.demo, updated: w.at, ageMin: Math.round((Date.now() - w.at) / 60000),
+    startBal: w.startBal, balance: w.balance, equity: w.equity, floating: w.floating, open: w.open || [],
+    net: +(bal - (w.startBal || 10000)).toFixed(2), ret: +((bal / (w.startBal || 10000) - 1) * 100).toFixed(2),
+    trades: trades.length, win: trades.length ? +(100 * trades.filter(t => t.net > 0).length / trades.length).toFixed(1) : 0,
+    pf: gl > 0 ? +(gp / gl).toFixed(2) : (gp > 0 ? 99 : 0), dd: +dd.toFixed(2), eqDD: +eDD.toFixed(2), recovery: dd > 0 ? +(((bal - (w.startBal || 10000)) / ((w.startBal || 10000) * dd / 100))).toFixed(2) : 0,
+    daysTraded, weekdays, topHour: topHour ? +topHour[0] : null, topHourShare: topHour && ins.length ? +(100 * topHour[1] / ins.length).toFixed(0) : 0,
+    tokenShare: holds.length ? +(100 * holds.filter(h => h <= 20).length / holds.length).toFixed(0) : 0,
+    medHoldH: holds.length ? +(holds.slice().sort((a, b) => a - b)[holds.length >> 1] / 60).toFixed(1) : 0,
+    lastEntry: lastIn, silentH: silentH === null ? null : +silentH.toFixed(1),
+    curve: Object.entries(daily).sort((a, b) => a[0] - b[0]).map(([d, b]) => [+d, +b.toFixed(2)]),
+    recent: trades.slice(-10).reverse().map(t => ({ tin: t.tin, tout: t.tout, dir: t.dir, v: t.v, net: +t.net.toFixed(2) })),
+    status: flags.some(f => f.lvl === 'fail') ? 'fail' : flags.length ? 'warn' : 'ok', flags,
+  };
+}
+
 // ---------------- HTTP ----------------
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -629,6 +679,20 @@ app.get('/api/replay/results', auth, (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="replay_results.jsonl"');
   try { res.type('text/plain').send(fs.readFileSync(REPLAY_OUT, 'utf8')); } catch { res.type('text/plain').send(''); }
 });
+app.post('/api/watch', auth, (req, res) => {
+  const b = req.body || {}; const acct = String(b.acct || '?');
+  for (const sd of (b.soldiers || [])) {
+    const key = acct + ':' + String(sd.label || sd.magic);
+    const prev = S.watch[key] || {};
+    const eq = (prev.eq || []).concat([{ ts: Date.now(), e: +b.equity || 0 }]).slice(-6000);
+    S.watch[key] = { label: String(sd.label || ''), magic: +sd.magic || 0, acct, demo: !!b.demo, at: Date.now(), now: +b.now || Math.floor(Date.now() / 1000),
+      start: +b.start || 0, startBal: +b.startBal || 10000, balance: +b.balance || 0, equity: +b.equity || 0, floating: +sd.floating || 0,
+      open: Array.isArray(sd.open) ? sd.open : [], deals: Array.isArray(sd.deals) ? sd.deals : [], eq };
+  }
+  save();
+  res.json({ ok: true, soldiers: (b.soldiers || []).length });
+});
+app.get('/api/watch', auth, (req, res) => res.json({ failDD: WATCH_FAIL_DD, soldiers: Object.values(S.watch || {}).map(watchStats) }));
 app.get('/api/log', auth, (req, res) => {
   const name = { trades: 'trades.jsonl', decisions: 'decisions.jsonl', acks: 'acks.jsonl' }[req.query.f] || 'decisions.jsonl';
   try { res.type('text/plain').send(fs.readFileSync(F(name), 'utf8')); } catch { res.type('text/plain').send(''); }
