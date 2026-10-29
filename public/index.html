@@ -51,8 +51,9 @@ pre{margin:0;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;col
   <button class="danger" id="bClose">ปิดทุกไม้</button>
 </header>
 <main>
-  <section><h2>สนามจริง: forward test (อ่านอย่างเดียว ผ่าน MAXX WATCH)</h2><div id="watch" class="grid"></div>
-    <div class="sub" id="watchNote"></div></section>
+  <section><h2>สนามจริง: forward test (CENTAUR / ATLAS ในตัว EA + MAXX WATCH)</h2><div id="watch" class="grid"></div>
+    <div class="sub" id="watchNote"></div>
+    <details style="margin-top:8px"><summary class="sub">บันทึกการตัดสินใจรายวันของ GOLD (02:00 server)</summary><pre id="goldlog"></pre></details></section>
   <div class="verdict" id="verdict">กำลังโหลด...</div>
   <section><h2>ข้อสอบย้อนหลัง: AI อ่านกราฟปี 2024-2026 แบบซ่อนชื่อคู่ (1,600 ครั้ง / 8,000 คำตอบ)</h2>
     <div id="rp" class="sub">...</div>
@@ -151,7 +152,8 @@ function spark(c){if(!c||c.length<2)return '';var W=300,H=60,xs=c.map(function(p
   return '<svg preserveAspectRatio="none" viewBox="0 0 '+W+' '+H+'" style="width:100%;height:60px"><polyline fill="none" stroke="'+(xs[xs.length-1]>=xs[0]?'#4ade80':'#f87171')+'" stroke-width="2" points="'+pts+'"/></svg>';}
 function tsNY(sec){return sec?new Date(sec*1000).toISOString().slice(5,16).replace('T',' '):'-';}
 function watchLoad(){api('/api/watch').then(function(w){var el=document.getElementById('watch');
-  if(!w.soldiers.length){el.innerHTML='<div class="sub">ยังไม่มีข้อมูล - แปะ MAXX_WATCH_v1 ในบัญชีที่รัน CENTAUR แล้วรอ 1 นาที</div>';return;}
+  if(!w.soldiers.length){el.innerHTML='<div class="sub">ยังไม่มีข้อมูล - เปิด InpGoldOn ใน EA v2 (หรือแปะ MAXX_WATCH_v1) แล้วรอ 1 นาที</div>';return;}
+  document.getElementById('goldlog').textContent=(w.gold||[]).map(function(g){return tsNY(g.t)+'  '+g.label+'  '+g.msg;}).join('\n')||'ยังไม่มี';
   document.getElementById('watchNote').textContent='เส้นตก: DD เกิน '+w.failDD+'% | ไม่มีไม้ใหม่เกิน 30 ชม. ในวันทำการ | เตือน: เทรดไม่ถึง 90% ของวันทำการ, เวลาเข้าไม้ไม่คงที่ | เวลาในตาราง = เวลา server MT5 | Equity DD = ทั้งบัญชี นับตั้งแต่ WATCH เริ่ม';
   el.innerHTML=w.soldiers.map(function(s){var st={ok:'ผ่าน',warn:'เฝ้าดู',fail:'ตกเส้น'}[s.status];
     return '<div class="wcard '+s.status+'"><div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:18px">'+esc(s.label)+'</b><span class="chip '+(s.status==='ok'?'ok':s.status==='warn'?'warn':'bad')+'">'+st+'</span></div>'+

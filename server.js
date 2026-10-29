@@ -9,7 +9,7 @@ const TECH = require('./techniques');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.7.0';
+const VERSION = 'v1.8.0';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -117,6 +117,7 @@ let S = {
   news: { events: [], fetchedAt: 0, err: '' },
   tradeSeq: 0,
   watch: {},
+  gold: [],
   sess: {},
 };
 function feed(msg) {
@@ -139,6 +140,7 @@ try {
   if (!S.daily) S.daily = {}; if (!S.sigDaily) S.sigDaily = {};
   if (!S.sess) S.sess = {};
   if (!S.watch) S.watch = {};
+  if (!S.gold) S.gold = [];
   console.log('[BOOT] state restored');
 } catch { console.log('[BOOT] fresh state'); }
 
@@ -692,7 +694,14 @@ app.post('/api/watch', auth, (req, res) => {
   save();
   res.json({ ok: true, soldiers: (b.soldiers || []).length });
 });
-app.get('/api/watch', auth, (req, res) => res.json({ failDD: WATCH_FAIL_DD, soldiers: Object.values(S.watch || {}).map(watchStats) }));
+app.post('/api/gold', auth, (req, res) => {
+  const b = req.body || {};
+  const rec = { at: Date.now(), t: +b.t || 0, label: String(b.label || ''), magic: +b.magic || 0, msg: String(b.msg || '').slice(0, 300) };
+  S.gold.unshift(rec); S.gold.length = Math.min(S.gold.length, 200);
+  appendJsonl('gold.jsonl', rec); feed(`[GOLD] ${rec.label} ${rec.msg}`); save();
+  res.json({ ok: true });
+});
+app.get('/api/watch', auth, (req, res) => res.json({ failDD: WATCH_FAIL_DD, soldiers: Object.values(S.watch || {}).map(watchStats), gold: (S.gold || []).slice(0, 30) }));
 app.get('/api/log', auth, (req, res) => {
   const name = { trades: 'trades.jsonl', decisions: 'decisions.jsonl', acks: 'acks.jsonl' }[req.query.f] || 'decisions.jsonl';
   try { res.type('text/plain').send(fs.readFileSync(F(name), 'utf8')); } catch { res.type('text/plain').send(''); }
