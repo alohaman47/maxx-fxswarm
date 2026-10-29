@@ -16,9 +16,11 @@ const dir = args[0];
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const SPLIT = Date.parse(opt('--split', '2026-01-01') + 'T00:00:00Z') / 1000;
 const OFF = parseFloat(opt('--offset', '7'));
-const COMM_PIPS = parseFloat(opt('--comm', '0.7'));     // Razor commission ~$7/lot round trip = 0.7 pip
+const COMM_PIPS = parseFloat(opt('--comm', '0.7'));
+const NOSPREAD = args.includes('--gross');     // Razor commission ~$7/lot round trip = 0.7 pip
 const WIN = 300;
-const X = { sl: 1.0, be: 1.0, trailStart: 1.5, trailDist: 1.0, tp: 3.0, maxBars: 32 };
+const TF = parseInt(opt('--tf', '15'), 10);       // 15 = M15 as exported, 60 = H1, 240 = H4
+const X = { sl: 1.0, be: 1.0, trailStart: 1.5, trailDist: 1.0, tp: 3.0, maxBars: parseInt(opt('--maxbars', '32'), 10) };
 if (!dir) { console.error('usage: node backtest.js <csv folder>'); process.exit(1); }
 
 function load(file) {
@@ -28,9 +30,18 @@ function load(file) {
   for (const ln of lines) {
     if (ln.startsWith('#meta')) { const f = ln.split(','); sym = f[1]; digits = +f[2]; point = +f[3]; continue; }
     const f = ln.split(','); if (!/^\d/.test(f[0])) continue;
-    bars.push({ t: +f[0], o: +f[1], h: +f[2], l: +f[3], c: +f[4], spr: (+f[5] || 0) * point });
+    bars.push({ t: +f[0], o: +f[1], h: +f[2], l: +f[3], c: +f[4], spr: NOSPREAD ? 0 : (+f[5] || 0) * point });
   }
   bars.sort((a, b) => a.t - b.t);
+  if (TF > 15) { // aggregate M15 -> higher timeframe (bar time = bucket start, spread = max in bucket)
+    const out = []; const sec = TF * 60;
+    for (const b of bars) {
+      const k = Math.floor(b.t / sec) * sec; const last = out[out.length - 1];
+      if (last && last.t === k) { last.h = Math.max(last.h, b.h); last.l = Math.min(last.l, b.l); last.c = b.c; last.spr = Math.max(last.spr, b.spr); }
+      else out.push({ t: k, o: b.o, h: b.h, l: b.l, c: b.c, spr: b.spr });
+    }
+    bars.length = 0; bars.push(...out);
+  }
   return { sym: sym.slice(0, 6).toUpperCase(), digits, point, bars };
 }
 
@@ -119,7 +130,7 @@ for (const code of TECH.CODES) {
 }
 rows.sort((a, b) => b.all.avgR - a.all.avgR);
 const fmt = (s) => s.n ? `${s.avgR >= 0 ? '+' : ''}${s.avgR}R n${s.n} PF${s.pf}` : '-';
-console.log(`\nMAXX FX SWARM technique lab backtest | ${files.length} pairs | split ${new Date(SPLIT * 1000).toISOString().slice(0, 10)} | offset ${OFF}h | commission ${COMM_PIPS} pip | exits SL1/BE1/trail1.5/TP3/32 bars\n`);
+console.log(`\nMAXX FX SWARM technique lab backtest | ${files.length} pairs | split ${new Date(SPLIT * 1000).toISOString().slice(0, 10)} | offset ${OFF}h | commission ${COMM_PIPS} pip | TF ${TF}m | exits SL1/BE1/trail1.5/TP3/${X.maxBars} bars\n`);
 for (const r of rows) {
   console.log(`${r.pass ? 'PASS' : '    '} ${r.name.padEnd(22)} [${r.fam}]  ALL ${fmt(r.all)} t${r.all.t} | IS ${fmt(r.is)} dayT ${r.dayT_IS} | OOS ${fmt(r.oos)} dayT ${r.dayT_OOS}`);
   console.log(`      years: ${Object.entries(r.years).map(([y, s]) => `${y} ${s.avgR >= 0 ? '+' : ''}${s.avgR}(${s.n})`).join('  ')} | sess: ${Object.entries(r.sess).map(([k, s]) => `${k} ${s.n ? (s.avgR >= 0 ? '+' : '') + s.avgR : '-'}`).join('  ')}`);
