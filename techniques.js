@@ -18,6 +18,7 @@ const BOOK_INFO = {
   RSI:  { name: 'RSI 30/70 Reversal',    fam: 'fade' },
   STO:  { name: 'Stochastic 14/3/3',     fam: 'fade' },
   PIV:  { name: 'Pivot S1/R1 Bounce',    fam: 'fade' },
+  FSL:  { name: 'Fade EMA20 slope',      fam: 'fade' },
 };
 const CODES = Object.keys(BOOK_INFO);
 
@@ -185,10 +186,14 @@ function tPIV(x, ctx) {
 }
 
 // wrappers so the (x, ctx) call never leaks ctx into a numeric default parameter
+// FADE-SLOPE: the 1-line rule that matched "reverse the AI" in the replay exam.
+// direction = against the 5-bar change of EMA20 (fires every bar; 1 open trade per pair limits it)
+function tFSL(x) { const e = ema(x.c, 20); const i = x.n - 1; const d = e[i] - e[i - 5]; return d >= 0 ? -1 : 1; }
+
 const FN = {
   EMA: (x) => tEMA(x), MACD: (x) => tMACD(x), ST: (x) => tST(x, 10, 3), ICHI: (x) => tICHI(x),
   DON: (x) => tDON(x, 20), LONB: (x, ctx) => tLONB(x, ctx), BB: (x) => tBB(x, 20, 2),
-  RSI: (x) => tRSI(x), STO: (x) => tSTO(x, 14), PIV: (x, ctx) => tPIV(x, ctx),
+  RSI: (x) => tRSI(x), STO: (x) => tSTO(x, 14), PIV: (x, ctx) => tPIV(x, ctx), FSL: (x) => tFSL(x),
 };
 
 // Evaluate all techniques on the last closed bar of `bars`.

@@ -19,6 +19,8 @@ const OFF = parseFloat(opt('--offset', '7'));
 const COMM_PIPS = parseFloat(opt('--comm', '0.7'));
 const NOSPREAD = args.includes('--gross');     // Razor commission ~$7/lot round trip = 0.7 pip
 const WIN = 300;
+const ONLY_SESS = opt('--sess', '');
+const ONLY = opt('--only', '');
 const TF = parseInt(opt('--tf', '15'), 10);       // 15 = M15 as exported, 60 = H1, 240 = H4
 const X = { sl: 1.0, be: 1.0, trailStart: 1.5, trailDist: 1.0, tp: 3.0, maxBars: parseInt(opt('--maxbars', '32'), 10) };
 if (!dir) { console.error('usage: node backtest.js <csv folder>'); process.exit(1); }
@@ -92,10 +94,12 @@ for (const f of files) {
       }
     }
     if (!windowOpen(b[i].t)) continue;
+    if (ONLY_SESS && sessOf(b[i].t + 900) !== ONLY_SESS) continue;
     const atr = atrSMA(b, i); if (!(atr > 0)) continue;
     const cost = b[i].spr + COMM_PIPS * pip;
     if (b[i].spr / atr > 0.3) continue;
-    const sigs = TECH.evalAll(b.slice(i - WIN + 1, i + 1), { offsetH: OFF });
+    let sigs = TECH.evalAll(b.slice(i - WIN + 1, i + 1), { offsetH: OFF });
+    if (ONLY) sigs = sigs.filter(x => ONLY.split(',').includes(x.code));
     for (const s of sigs) {
       if (open[s.code]) continue;
       open[s.code] = { dir: s.dir, entry: b[i].c, atr, sl: b[i].c - s.dir * X.sl * atr, tp: b[i].c + s.dir * X.tp * atr,
@@ -118,7 +122,7 @@ function dayT(list) { // t-stat on daily summed R (handles cross-pair clustering
   const v = Object.values(by); return stat(v).t;
 }
 const rows = [];
-for (const code of TECH.CODES) {
+for (const code of TECH.CODES.filter(c => !ONLY || ONLY.split(',').includes(c))) {
   const L = trades.filter(x => x.code === code);
   const IS = L.filter(x => x.t < SPLIT), OOS = L.filter(x => x.t >= SPLIT);
   const years = {}; for (const x of L) { const y = new Date((x.t - OFF * 3600) * 1000).getUTCFullYear(); (years[y] = years[y] || []).push(x.R); }

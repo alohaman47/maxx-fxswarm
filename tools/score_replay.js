@@ -83,3 +83,11 @@ for (const s of ['ASIA', 'LON', 'OVL', 'NYPM']) { const L = sel.filter(r => r.se
 console.log('calibration (all BUY/SELL, AI gross / net):');
 for (const [lo, hi] of [[0, 50], [50, 60], [60, 70], [70, 80], [80, 101]]) { const L = rows.filter(r => r.conf >= lo && r.conf < hi); console.log(`  ${lo}-${hi - 1}  gross ${stat(L.map(r => r.ai.gross)).avgR}  net ${stat(L.map(r => r.ai.net)).avgR}  t ${stat(L.map(r => r.ai.gross)).t}  (n${L.length})`); }
 console.log(`direction split: BUY ${sel.filter(r => r.d > 0).length} / SELL ${sel.filter(r => r.d < 0).length}`);
+console.log('session x year (net avg R: REVERSE / FADE-SLOPE / RANDOM, n):');
+for (const s of ['ASIA', 'LON', 'OVL', 'NYPM']) {
+  const parts = [];
+  for (const y of [...new Set(sel.map(r => r.year))].sort()) { const L = sel.filter(r => r.sess === s && r.year === y);
+    parts.push(`${y} ${stat(L.map(r => r.rv.net)).avgR}/${stat(L.map(r => r.fsl.net)).avgR}/${stat(L.map(r => r.rn.net)).avgR} n${L.length}`); }
+  const L = sel.filter(r => r.sess === s);
+  console.log(`  ${s.padEnd(5)} ${parts.join(' | ')} | REV t${stat(L.map(r => r.rv.net)).t} FSL t${stat(L.map(r => r.fsl.net)).t}`);
+}
