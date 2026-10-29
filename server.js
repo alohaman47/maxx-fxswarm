@@ -8,7 +8,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.3.0';
+const VERSION = 'v1.3.1';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -352,7 +352,8 @@ async function askAI(syms) {
       const text = await callOnce(prompt, key);
       if (!text.trim()) throw Object.assign(new Error('empty reply'), { status: 599 });
       S.ai.keyIdx++; // round-robin across keys
-      return extractJson(text);
+      try { return extractJson(text); }
+      catch (pe) { console.error('[AI RAW]', text.slice(0, 400)); throw Object.assign(new Error('bad JSON: ' + pe.message), { status: 598 }); }
     } catch (e) {
       lastErr = e;
       console.error('[AI ERROR]', e.message);
@@ -361,6 +362,7 @@ async function askAI(syms) {
         geminiBad[geminiModel] = Date.now() + 6 * 3600e3;
         try { await resolveGeminiModel(true); continue; } catch (e2) { lastErr = e2; console.error('[AI ERROR]', e2.message); break; }
       }
+      if (e.status === 598 && attempt < 2) { await sleep(1000); continue; }   // malformed JSON -> ask again
       if (e.status === 429 || (e.status >= 500)) { S.ai.keyIdx++; await sleep(2500); continue; }
       if (PROVIDER === 'gemini' && e.status === 404 && attempt === 0) {
         try { await resolveGeminiModel(true); continue; } catch (e2) { lastErr = e2; console.error('[AI ERROR]', e2.message); }
