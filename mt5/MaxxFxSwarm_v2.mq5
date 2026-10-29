@@ -67,12 +67,11 @@ input double InpG_BrakeCut     = 0.5;                               // size mult
 input int    InpG_VolLook      = 20;                                // realized vol lookback (D1 bars)
 input double InpG_MaxSpread    = 60;                                // wait if spread above (max 4 bars)
 //--- CENTAUR armor (mode 1 only)
-input double InpG_ExplMult     = 2.0;                               // ATR explosion: M15 ATR14 > mult x mean -> token day
+input double InpG_ExplMult     = 2.0;                               // [armor1] M15 ATR explosion multiple
 input int    InpG_ExplBars     = 500;                               // ATR explosion: mean window (M15 bars)
-input int    InpG_PFWindow     = 60;                                // rolling PF window (full-size trades, R-based)
-input int    InpG_PFMinTrades  = 20;                                // armor PF needs at least this many trades
-input double InpG_ThrottleOn   = 1.0;                               // PF below -> throttle
-input double InpG_ThrottleOff  = 1.10;                              // PF above -> release throttle
+input int    InpG_PFWindow     = 60;                                // [armor2] closed trades in PF(R) window
+input double InpG_PFTrigger    = 1.00;                              // [armor2] PF(R) below -> derisk
+input double InpG_PFRecover    = 1.10;                              // [armor2] PF(R) above -> recover
 input double InpG_ThrottleCut  = 0.5;                               // size multiplier while throttled
 input double InpG_HardPF       = 0.6;                               // PF below -> hard brake
 input int    InpG_HardDays     = 7;                                 // hard brake = token-only days
@@ -506,11 +505,14 @@ void PollCommands()
 //|   daily 02:00 server rebalance, size = Equity*min(TV/RV20, cap), |
 //|   D1 EMA100 gate scales SIZE, gate-off = token touch (1 M15 bar),|
 //|   8% HWM brake -> x0.5, disaster stop 1.3 x ATR14(D1), no TP.    |
-//| Mode 1 = CENTAUR: + Kimi armor                                   |
-//|   (a) ATR explosion: M15 ATR14 > 2x mean(500) -> token day       |
-//|   (b) R-based rolling PF (60 full-size trades): <1.0 -> x0.5,    |
-//|       release above 1.10                                         |
-//|   (c) hard brake: PF < 0.6 -> token-only for 7 days              |
+//| Mode 1 = CENTAUR_v1 (ported line-for-line from the original):    |
+//|   armor1 ATR explosion: M15 ATR14 > 2x mean(500) -> token day    |
+//|   armor2 PF(R) of last 60 closed trades (all trades, filled via  |
+//|          OnTradeTransaction, window resets on restart) < 1.00 -> |
+//|          size x0.5 until PF(R) > 1.10                            |
+//|   armor3 PF(R) < 0.60 -> token-touch mode for 7 days             |
+//|   armor state + HWM use the same GlobalVariable names as         |
+//|   CENTAUR_v1 (CENTAUR_<sym>_<magic>_...).                        |
 //| Only symbol/magic plumbing differs from the original files.      |
 //+------------------------------------------------------------------+
 CTrade   gtrade;
@@ -527,6 +529,10 @@ datetime g_gEntryBar    = 0;
 string   g_gStatus      = "";
 string   g_gGv          = "";
 datetime g_gLastWatch   = 0;
+double   g_rWin[];                  // CENTAUR rolling R window
+bool     g_derisked     = false;
+datetime g_hbUntil      = 0;
+double   g_openRiskMoney = 0.0;
 
 bool IsTester() { return (MQLInfoInteger(MQL_TESTER) != 0 || MQLInfoInteger(MQL_OPTIMIZATION) != 0); }
 string GoldLabel() { return (InpGoldMode == 1) ? "CENTAUR" : "ATLAS_v6"; }
@@ -621,38 +627,68 @@ bool GoldExplosion()
    return (atrNow > InpG_ExplMult * avg);
 }
 
-//--- CENTAUR armor (b)(c): R-based rolling PF over the last N full-size trades
-// risk of each full-size entry is stored as GV  <prefix>R_<positionId> = lot * contract * stop distance
-double GoldRollingPF(int &count)
+//--- CENTAUR_v1 armor2/3 (verbatim logic)
+string CenGV(const string suffix) { return "CENTAUR_" + g_gSym + "_" + IntegerToString((int)InpGoldMagic) + "_" + suffix; }
+void CenPersist()
 {
-   count = 0;
-   if(!HistorySelect(0, TimeCurrent() + 60)) return -1.0;
-   double rs[];
-   ArrayResize(rs, 0);
-   int total = HistoryDealsTotal();
-   for(int i = total - 1; i >= 0 && count < InpG_PFWindow; i--)
-   {
-      ulong d = HistoryDealGetTicket(i);
-      if(d == 0) continue;
-      if(HistoryDealGetInteger(d, DEAL_MAGIC) != InpGoldMagic) continue;
-      if(HistoryDealGetString(d, DEAL_SYMBOL) != g_gSym) continue;
-      ENUM_DEAL_ENTRY en = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(d, DEAL_ENTRY);
-      if(en != DEAL_ENTRY_OUT && en != DEAL_ENTRY_OUT_BY) continue;
-      long pid = HistoryDealGetInteger(d, DEAL_POSITION_ID);
-      string gv = g_gGv + "R_" + IntegerToString(pid);
-      if(!GlobalVariableCheck(gv)) continue;           // token / unknown trades are not counted
-      double risk = GlobalVariableGet(gv);
-      if(risk <= 0.0) continue;
-      double net = HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_COMMISSION);
-      ArrayResize(rs, count + 1);
-      rs[count] = net / risk;
-      count++;
-   }
-   if(count == 0) return -1.0;
+   if(InpGoldMode != 1) return;
+   GlobalVariableSet(CenGV("DERISK"),   g_derisked ? 1.0 : 0.0);
+   GlobalVariableSet(CenGV("HBUNTIL"),  (double)g_hbUntil);
+   GlobalVariableSet(CenGV("OPENRISK"), g_openRiskMoney);
+}
+void CenLoad()
+{
+   if(GlobalVariableCheck(CenGV("DERISK")))   g_derisked = (GlobalVariableGet(CenGV("DERISK")) != 0.0);
+   if(GlobalVariableCheck(CenGV("HBUNTIL")))  g_hbUntil = (datetime)GlobalVariableGet(CenGV("HBUNTIL"));
+   if(GlobalVariableCheck(CenGV("OPENRISK"))) g_openRiskMoney = GlobalVariableGet(CenGV("OPENRISK"));
+}
+double CenRollingPF()
+{
+   int n = ArraySize(g_rWin);
+   if(n == 0) return 0.0;
    double gp = 0.0, gl = 0.0;
-   for(int k = 0; k < count; k++) { if(rs[k] > 0) gp += rs[k]; else gl -= rs[k]; }
-   if(gl <= 0.0) return 99.0;
+   for(int i = 0; i < n; i++)
+   {
+      if(g_rWin[i] > 0.0) gp += g_rWin[i];
+      else                gl += -g_rWin[i];
+   }
+   if(gl <= 0.0) return (gp > 0.0 ? DBL_MAX : 1.0);
    return gp / gl;
+}
+void CenAddClosedR(const double r)
+{
+   int sz = ArraySize(g_rWin);
+   if(sz < InpG_PFWindow)
+   {
+      ArrayResize(g_rWin, sz + 1);
+      g_rWin[sz] = r;
+   }
+   else
+   {
+      for(int i = 0; i < sz - 1; i++) g_rWin[i] = g_rWin[i + 1];
+      g_rWin[sz - 1] = r;
+   }
+}
+void CenEvaluateArmor()
+{
+   if(ArraySize(g_rWin) < InpG_PFWindow) return;   // wait for a full window
+   double pf = CenRollingPF();
+   if(pf < InpG_HardPF)
+   {
+      g_hbUntil = TimeCurrent() + (datetime)InpG_HardDays * 86400;
+      Print("CENTAUR [HardBrake] PF(R)=", DoubleToString(pf, 2), " -> token-touch mode until ", TimeToString(g_hbUntil));
+   }
+   if(!g_derisked && pf < InpG_PFTrigger)
+   {
+      g_derisked = true;
+      Print("CENTAUR [Throttle] DE-RISK ON: PF(R)=", DoubleToString(pf, 2));
+   }
+   else if(g_derisked && pf > InpG_PFRecover)
+   {
+      g_derisked = false;
+      Print("CENTAUR [Throttle] DE-RISK OFF: PF(R)=", DoubleToString(pf, 2));
+   }
+   CenPersist();
 }
 
 void GoldReport(string what)
@@ -695,40 +731,17 @@ void GoldRebalance()
    double closeD1 = iClose(g_gSym, PERIOD_D1, 1);
    bool gateOn = (closeD1 > ema);
 
-   // ---- CENTAUR armor ----
+   bool token = !gateOn;
    string armor = "";
-   bool armorToken = false;
-   double armorMult = 1.0;
    if(InpGoldMode == 1)
    {
-      int cnt = 0;
-      double pf = GoldRollingPF(cnt);
-      string thrGv = g_gGv + "THR", brkGv = g_gGv + "BRK_UNTIL", brkNGv = g_gGv + "BRK_N";
-      bool thr = GlobalVariableCheck(thrGv) && GlobalVariableGet(thrGv) > 0.5;
-      if(cnt >= InpG_PFMinTrades && pf >= 0.0)
-      {
-         if(!thr && pf < InpG_ThrottleOn) thr = true;
-         else if(thr && pf > InpG_ThrottleOff) thr = false;
-         double lastN = GlobalVariableCheck(brkNGv) ? GlobalVariableGet(brkNGv) : -1.0;
-         if(pf < InpG_HardPF && (double)cnt != lastN)
-         {
-            GlobalVariableSet(brkGv, (double)(TimeCurrent() + InpG_HardDays * 86400));
-            GlobalVariableSet(brkNGv, (double)cnt);
-         }
-      }
-      GlobalVariableSet(thrGv, thr ? 1.0 : 0.0);
-      bool braked = GlobalVariableCheck(brkGv) && TimeCurrent() < (datetime)GlobalVariableGet(brkGv);
-      bool expl = GoldExplosion();
-      if(expl)   { armorToken = true; armor += " ATR-explosion"; }
-      if(braked) { armorToken = true; armor += " hard-brake"; }
-      if(thr)    { armorMult = InpG_ThrottleCut; armor += " PF-throttle"; }
-      armor += " pf=" + (cnt > 0 ? DoubleToString(pf, 2) : "-") + "(" + IntegerToString(cnt) + ")";
+      if(GoldExplosion())          { token = true; armor += " ATR-explosion"; }   // armor 1
+      if(TimeCurrent() < g_hbUntil) { token = true; armor += " hard-brake"; }      // armor 3
    }
-
-   bool token = (!gateOn || armorToken);
    double frac = token ? InpG_GateFrac : 1.0;
    if(hwm > 0 && (1.0 - equity / hwm) > InpG_BrakeDD) frac *= InpG_BrakeCut;
-   if(!token) frac *= armorMult;
+   if(InpGoldMode == 1 && g_derisked) { frac *= InpG_ThrottleCut; armor += " PF-throttle"; }   // armor 2
+   if(InpGoldMode == 1) armor += " pfR=" + (ArraySize(g_rWin) > 0 ? DoubleToString(MathMin(CenRollingPF(), 99.0), 2) : "-") + "(" + IntegerToString(ArraySize(g_rWin)) + ")";
 
    double ask = SymbolInfoDouble(g_gSym, SYMBOL_ASK);
    if(ask <= 0) return;
@@ -749,11 +762,10 @@ void GoldRebalance()
    {
       g_gTokenPos = token;                                   // token day = touch, exit next M15 bar
       g_gEntryBar = iTime(g_gSym, PERIOD_M15, 0);
-      if(InpGoldMode == 1 && !token)
+      if(InpGoldMode == 1)
       {
-         ulong tk = GoldPos();
-         if(tk != 0 && PositionSelectByTicket(tk))
-            GlobalVariableSet(g_gGv + "R_" + IntegerToString(PositionGetInteger(POSITION_IDENTIFIER)), lot * contract * (ask - sl));
+         g_openRiskMoney = lot * contract * (ask - sl);   // for R at close
+         CenPersist();
       }
       GoldReport(desc);
    }
@@ -859,8 +871,10 @@ bool GoldInit()
    g_hAtrM15 = iATR(g_gSym, PERIOD_M15, 14);
    if(g_hEmaD1 == INVALID_HANDLE || g_hAtrD1 == INVALID_HANDLE || g_hAtrM15 == INVALID_HANDLE) { Print("GOLD: indicator handle failed"); return false; }
    // same HWM global-variable name as CLAUDE_ATLAS_v6 so a running test keeps its high-water mark
-   g_gHwmName = "ATLAS_HWM_" + g_gSym + "_" + IntegerToString((int)InpGoldMagic);
+   g_gHwmName = (InpGoldMode == 1) ? CenGV("HWM") : "ATLAS_HWM_" + g_gSym + "_" + IntegerToString((int)InpGoldMagic);
    if(!GlobalVariableCheck(g_gHwmName)) GlobalVariableSet(g_gHwmName, AccountInfoDouble(ACCOUNT_EQUITY));
+   ArrayResize(g_rWin, 0);   // R window starts empty after restart (as CENTAUR_v1)
+   if(InpGoldMode == 1) CenLoad();
    g_gGv = "CEN_" + IntegerToString((int)InpGoldMagic) + "_";
    if(!GlobalVariableCheck(g_gGv + "STARTBAL")) GlobalVariableSet(g_gGv + "STARTBAL", AccountInfoDouble(ACCOUNT_BALANCE));
    if(!GlobalVariableCheck(g_gGv + "STARTT")) GlobalVariableSet(g_gGv + "STARTT", (double)TimeCurrent());
@@ -919,6 +933,7 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    for(int i = 0; i < g_n; i++) IndicatorRelease(g_atr[i]);
+   if(InpGoldOn) CenPersist();
    if(g_hEmaD1 != INVALID_HANDLE) IndicatorRelease(g_hEmaD1);
    if(g_hAtrD1 != INVALID_HANDLE) IndicatorRelease(g_hAtrD1);
    if(g_hAtrM15 != INVALID_HANDLE) IndicatorRelease(g_hAtrM15);
@@ -926,6 +941,28 @@ void OnDeinit(const int reason)
 }
 
 void OnTick() { GoldStep(); }
+
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+{
+   if(!InpGoldOn || InpGoldMode != 1) return;
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+   if(trans.deal == 0) return;
+   if(!HistoryDealSelect(trans.deal)) return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpGoldMagic) return;
+   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != g_gSym) return;
+   long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) return;
+   double pnl = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
+              + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
+              + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
+   if(g_openRiskMoney > 0.0)
+   {
+      CenAddClosedR(pnl / g_openRiskMoney);
+      g_openRiskMoney = 0.0;
+      CenEvaluateArmor();
+   }
+   CenPersist();
+}
 
 void OnTimer()
 {
