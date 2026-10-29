@@ -8,7 +8,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.2.0';
+const VERSION = 'v1.3.0';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -27,7 +27,7 @@ const CFG = {
   anthropicKey: env('ANTHROPIC_API_KEY', ''),
   anthropicModel: env('ANTHROPIC_MODEL', 'claude-haiku-5-5'),
   minConf: num('MIN_CONF', 80),
-  virtMinConf: num('VIRT_MIN_CONF', num('MIN_CONF', 80)), // threshold for virtual books (can be lower than real)
+  virtMinConf: num('VIRT_MIN_CONF', 60), // threshold for virtual books (can be lower than real)
   batchSize: Math.max(1, Math.round(num('BATCH_SIZE', 5))),
   aiGapMs: num('AI_GAP_MS', 5000),
   aiDailyLimit: num('AI_DAILY_LIMIT', 900),
@@ -239,12 +239,13 @@ function stepAllVirtual(sym, newBars) {
 }
 
 // ---------------- AI ----------------
-const SYS = `You are a disciplined FX intraday analyst working on M15 charts.
-For each pair you get indicators and the last closed M15 bars. Decide BUY, SELL or NONE for a trade that will be managed mechanically:
-stop-loss 1 ATR, break-even at +1 ATR, trailing stop from +1.5 ATR, take-profit +3 ATR, max hold 8 hours.
-Only call BUY or SELL when you expect price to travel at least 1.5 ATR in your direction before it moves 1 ATR against you.
-Most of the time the correct answer is NONE. Do not force trades. Avoid pairs with a high-impact news event soon.
-"conf" = your honest probability (0-100) that the trade reaches +1.5 ATR before -1 ATR. 50 means coin flip.
+const SYS = `You are an FX intraday analyst working on M15 charts.
+For EACH pair, pick the more likely direction for the next few hours: BUY or SELL.
+The trade is managed mechanically: stop-loss 1 ATR, break-even at +1 ATR, trailing stop from +1.5 ATR, take-profit +3 ATR, max hold 8 hours.
+Use NONE only when: a high-impact news event for one of the pair's currencies is within 30 minutes, or spread is above 0.3 ATR, or the bars are clearly broken/flat (no movement). Otherwise you MUST choose BUY or SELL.
+"conf" = your honest probability (0-100) that price reaches +1.5 ATR in your direction BEFORE it moves 1 ATR against you.
+50 = no real edge (a coin flip). Use the full range honestly: weak reads should be 50-60, decent setups 60-75, and only clear, high-quality setups 80+.
+Your conf numbers will be scored against real outcomes, so calibration matters more than being bold or cautious.
 Reply with JSON only, no markdown:
 {"signals":[{"pair":"EURUSD","action":"BUY|SELL|NONE","conf":0-100,"why":"short reason in Thai, max 15 words"}]}
 Return exactly one entry per pair given.`;
@@ -432,7 +433,7 @@ function handleSignals(syms, res) {
         const plan = [['AI', dir], ['REV', -dir], ['RND', null], ['TRD', trendDir]];
         for (const [book, want] of plan) {
           const cur = S.books[book][s];
-          if (book === 'RND' && cur) continue;            // keep the coin's earlier trade
+          if (cur) continue;                              // one trade per pair per book; ATR exits manage it (no churn on flips)
           const d = want === null ? (Math.random() < 0.5 ? 1 : -1) : want;
           if (cur && cur.dir === d) continue;
           if (cur) { closeVirtual(cur, p.bars[p.bars.length - 1].c, 'FLIP'); delete S.books[book][s]; }

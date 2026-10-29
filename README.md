@@ -36,7 +36,7 @@ EA (MT5, VPS)  --ทุกแท่ง M15 ปิด-->  server (Railway)  --bat
 | `GEMINI_KEYS` | API key จาก aistudio.google.com/apikey (หลาย key ใส่คั่นด้วย , ได้) |
 | `DATA_DIR` | `/data` |
 
-ตัวเลือก (มีค่า default แล้ว): `GEMINI_MODEL` (auto), `MIN_CONF` (80), `VIRT_MIN_CONF` (เท่า MIN_CONF - เกณฑ์ของ virtual books), `BATCH_SIZE` (5), `AI_START_NY`/`AI_END_NY` (0/24), `AI_SKIP_NY` (16-19 = ข้ามช่วงหลัง NY ปิดถึง rollover), `AI_DAILY_LIMIT` (900), `AI_GAP_MS` (5000), `SL_ATR` `BE_ATR` `TRAIL_START_ATR` `TRAIL_DIST_ATR` `TP_ATR` `MAX_HOLD_BARS`, `NEWS_GUARD` (1)
+ตัวเลือก (มีค่า default แล้ว): `GEMINI_MODEL` (auto), `MIN_CONF` (80), `VIRT_MIN_CONF` (60 - เกณฑ์ของ virtual books), `BATCH_SIZE` (5), `AI_START_NY`/`AI_END_NY` (0/24), `AI_SKIP_NY` (16-19 = ข้ามช่วงหลัง NY ปิดถึง rollover), `AI_DAILY_LIMIT` (900), `AI_GAP_MS` (5000), `SL_ATR` `BE_ATR` `TRAIL_START_ATR` `TRAIL_DIST_ATR` `TP_ATR` `MAX_HOLD_BARS`, `NEWS_GUARD` (1)
 
 AI ตัวอื่นแทน Gemini ได้: `AI_PROVIDER=openai` + `OPENAI_KEYS` + `OPENAI_BASE_URL` + `OPENAI_MODEL` (Groq / OpenRouter / DeepSeek) หรือ `AI_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` (Haiku) — ไม่ใส่ key เลย = mock mode (dashboard ขึ้นแดง)
 
