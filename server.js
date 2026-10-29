@@ -8,7 +8,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.3.1';
+const VERSION = 'v1.4.0';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -87,18 +87,20 @@ function aiWindowOpen() {
 
 // ---------------- state ----------------
 const newStats = () => ({ n: 0, w: 0, sumR: 0, gp: 0, gl: 0 });
-const BOOKS = ['AI', 'REV', 'RND', 'TRD'];
+const BOOKS = ['AI', 'REV', 'RND', 'TRD', 'FTR'];
+const SESSIONS = ['ASIA', 'LON', 'OVL', 'NYPM'];
+const sessOf = (h) => (h >= 19 || h < 3) ? 'ASIA' : h < 8 ? 'LON' : h < 12 ? 'OVL' : 'NYPM';
 const BUCKETS = ['<60', '60-69', '70-79', '80-89', '90+'];
 const bucketOf = (c) => c < 60 ? '<60' : c < 70 ? '60-69' : c < 80 ? '70-79' : c < 90 ? '80-89' : '90+';
 
 let S = {
   paused: false,
   pairs: {},                       // sym -> {d, atr, spr, bars:[{t,o,h,l,c}], lastT}
-  books: { AI: {}, REV: {}, RND: {}, TRD: {} }, // sym -> open virtual trade
+  books: { AI: {}, REV: {}, RND: {}, TRD: {}, FTR: {} }, // sym -> open virtual trade
   calibOpen: [],
   daily: {},                       // NY day -> book -> {n, sumR}
   sigDaily: {},                    // NY day -> {asked, signals, taken}
-  stats: { AI: newStats(), REV: newStats(), RND: newStats(), TRD: newStats(), calib: Object.fromEntries(BUCKETS.map(b => [b, newStats()])),
+  stats: { AI: newStats(), REV: newStats(), RND: newStats(), TRD: newStats(), FTR: newStats(), calib: Object.fromEntries(BUCKETS.map(b => [b, newStats()])),
     side: { BUY: newStats(), SELL: newStats() } },
   closed: [],
   decisions: [],
@@ -127,6 +129,7 @@ try {
   for (const b of BUCKETS) if (!S.stats.calib[b]) S.stats.calib[b] = newStats();
   for (const b of BOOKS) { if (!S.books[b]) S.books[b] = {}; if (!S.stats[b]) S.stats[b] = newStats(); }
   if (!S.daily) S.daily = {}; if (!S.sigDaily) S.sigDaily = {};
+  if (!S.sess) S.sess = {};
   console.log('[BOOT] state restored');
 } catch { console.log('[BOOT] fresh state'); }
 
@@ -188,7 +191,7 @@ function openVirtual(book, sym, dir, conf, why, p) {
   const atr = p.atr; const last = p.bars[p.bars.length - 1];
   const tr = { id: ++S.tradeSeq, book, sym, dir, conf, why, entry: last.c, atr,
     sl: last.c - dir * CFG.slAtr * atr, sl0: last.c - dir * CFG.slAtr * atr, tp: last.c + dir * CFG.tpAtr * atr,
-    maxFav: 0, bars: 0, openT: last.t, openAt: Date.now(), sprR: p.spr / (CFG.slAtr * atr) };
+    maxFav: 0, bars: 0, openT: last.t, openAt: Date.now(), sess: sessOf(nyParts().hour), sprR: p.spr / (CFG.slAtr * atr) };
   return tr;
 }
 function closeVirtual(tr, price, reason) {
@@ -201,6 +204,10 @@ function closeVirtual(tr, price, reason) {
     add(S.stats[tr.book]);
     const day = nyParts().day; const dd = S.daily[day] || (S.daily[day] = {});
     const db = dd[tr.book] || (dd[tr.book] = { n: 0, sumR: 0 }); db.n++; db.sumR += R;
+    if (tr.sess) {
+      const sb = S.sess[tr.book] || (S.sess[tr.book] = {});
+      add(sb[tr.sess] || (sb[tr.sess] = newStats()));
+    }
   }
   if (tr.book !== 'CAL') { S.closed.unshift(rec); S.closed.length = Math.min(S.closed.length, 300); }
   appendJsonl('trades.jsonl', rec);
@@ -390,7 +397,7 @@ async function pump() {
       if (Date.now() - job.at > CFG.signalMaxAgeMin * 60e3) { feed(`[AI] batch ${job.syms.join(',')} too old, dropped`); continue; }
       try {
         const res = await askAI(job.syms);
-        S.ai.lastOkAt = Date.now();
+        S.ai.lastOkAt = Date.now(); S.ai.lastErr = '';
         handleSignals(job.syms, res);
       } catch (e) {
         S.ai.errors++; S.ai.lastErr = e.message.slice(0, 160);
@@ -432,7 +439,7 @@ function handleSignals(syms, res) {
         // same moment, same pair, same exits - only the direction rule differs
         const c20 = ema(p.bars.map(x => x.c), 20), c50 = ema(p.bars.map(x => x.c), 50);
         const trendDir = c20[c20.length - 1] >= c50[c50.length - 1] ? 1 : -1;
-        const plan = [['AI', dir], ['REV', -dir], ['RND', null], ['TRD', trendDir]];
+        const plan = [['AI', dir], ['REV', -dir], ['RND', null], ['TRD', trendDir], ['FTR', -trendDir]];
         for (const [book, want] of plan) {
           const cur = S.books[book][s];
           if (cur) continue;                              // one trade per pair per book; ATR exits manage it (no churn on flips)
@@ -524,6 +531,7 @@ app.get('/api/state', auth, (req, res) => {
     ai: S.ai, ea: { ...S.ea, ageSec: S.ea.lastAt ? Math.round((Date.now() - S.ea.lastAt) / 1000) : null },
     books: Object.fromEntries(BOOKS.map(b => [b, sum(S.stats[b])])),
     daily: Object.keys(S.daily).sort().reverse().slice(0, 14).map(day => ({ day, ...Object.fromEntries(BOOKS.map(b => [b, S.daily[day][b] ? { n: S.daily[day][b].n, sumR: +S.daily[day][b].sumR.toFixed(2) } : { n: 0, sumR: 0 }])) })),
+    sess: Object.fromEntries(BOOKS.map(b => [b, Object.fromEntries(SESSIONS.map(x => [x, (S.sess[b] && S.sess[b][x]) ? sum(S.sess[b][x]) : sum(newStats())]))])),
     dayScore: Object.fromEntries(BOOKS.map(b => { const days = Object.values(S.daily).map(d => d[b]).filter(x => x && x.n); return [b, { up: days.filter(x => x.sumR > 0).length, down: days.filter(x => x.sumR <= 0).length }]; })),
     sigDaily: Object.keys(S.sigDaily).sort().reverse().slice(0, 14).map(day => ({ day, ...S.sigDaily[day] })),
     calib: BUCKETS.map(b => ({ bucket: b, ...sum(S.stats.calib[b]) })),

@@ -53,7 +53,10 @@ pre{margin:0;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;col
     <section><h2>RANDOM (โยนเหรียญ จังหวะเดียวกัน)</h2><div id="sRND"></div></section>
     <section><h2>TREND (EMA20/50 จังหวะเดียวกัน)</h2><div id="sTRD"></div></section>
     <section><h2>REVERSE (กลับฝั่ง AI)</h2><div id="sREV"></div></section>
+    <section><h2>FADE-TREND (สวน EMA20/50 จังหวะเดียวกัน)</h2><div id="sFTR"></div></section>
   </div>
+  <section><h2>แยกตาม session (avg R ต่อไม้ / จำนวนไม้) - ดูว่า edge อยู่ทุกช่วงหรือแค่ช่วงเดียว</h2><div id="sess"></div>
+    <div class="sub">ASIA 19-03 NY | LON 03-08 | OVL (ลอนดอน+NY) 08-12 | NYPM 12-16 - นับตามเวลาเปิดไม้</div></section>
   <div class="grid">
     <section><h2>AI วันนี้</h2><div id="sCalls"></div></section>
     <section><h2>สัญญาณต่อวัน</h2><div id="sig"></div></section>
@@ -93,10 +96,12 @@ function render(s){
   chip('cWin', s.paused?'PAUSED':(s.windowOpen?'ช่วงถาม AI เปิด ('+s.cfg.window+')':'นอกช่วง ('+s.cfg.window+')'), s.paused?'bad':(s.windowOpen?'ok':''));
   var nx=s.news.next[0]; chip('cNews', s.news.err&&!s.news.n?'ปฏิทินข่าวโหลดไม่ได้':(nx?'ข่าว '+nx.ccy+' '+t(nx.at)+' NY':'ไม่มีข่าวแรงเร็วๆ นี้'), s.news.err&&!s.news.n?'bad':(nx?'warn':''));
   paused=s.paused; document.getElementById('bPause').textContent=paused?'Resume':'Pause';
-  ['AI','RND','TRD','REV'].forEach(function(k){document.getElementById('s'+k).innerHTML=bookHtml(s.books[k],s.dayScore&&s.dayScore[k]);});
+  ['AI','RND','TRD','REV','FTR'].forEach(function(k){document.getElementById('s'+k).innerHTML=bookHtml(s.books[k],s.dayScore&&s.dayScore[k]);});
   var sg=s.sigDaily||[]; var avg=sg.length?(sg.reduce(function(a,d){return a+d.signals;},0)/sg.length).toFixed(1):'0';
   document.getElementById('sig').innerHTML='<div class="big">'+avg+'<span class="sub"> สัญญาณ/วัน (เฉลี่ย)</span></div>'+tbl(['วัน','ถาม','BUY/SELL','ส่งคำสั่ง'],sg.slice(0,7).map(function(d){return '<tr><td>'+d.day+'</td><td>'+d.asked+'</td><td>'+d.signals+'</td><td>'+d.taken+'</td></tr>';}))+'<div class="sub">เกณฑ์ virtual '+s.cfg.virtMinConf+' / เกณฑ์ส่งคำสั่ง '+s.cfg.minConf+' - ถ้าเฉลี่ยต่ำกว่า 3/วัน หลัง 3 วัน ค่อยลดเกณฑ์ virtual</div>';
-  var dl=s.daily||[]; document.getElementById('daily').innerHTML=dl.length?tbl(['วัน NY','AI','RANDOM','TREND','REVERSE'],dl.map(function(d){return '<tr><td>'+d.day+'</td>'+['AI','RND','TRD','REV'].map(function(k){var x=d[k];return '<td class="'+cls(x.sumR)+'">'+(x.n?(x.sumR>0?'+':'')+x.sumR+'R ('+x.n+')':'-')+'</td>';}).join('')+'</tr>';})):'<div class="sub">ยังไม่มีไม้ที่ปิด</div>';
+  var BN={AI:'AI',RND:'RANDOM',TRD:'TREND',REV:'REVERSE',FTR:'FADE-TREND'}, SS=['ASIA','LON','OVL','NYPM'];
+  if (s.sess) document.getElementById('sess').innerHTML=tbl(['book'].concat(SS), Object.keys(BN).map(function(k){return '<tr><td>'+BN[k]+'</td>'+SS.map(function(x){var c=s.sess[k][x];return '<td class="'+cls(c.avgR)+'">'+(c.n?(c.avgR>0?'+':'')+c.avgR+' ('+c.n+')':'-')+'</td>';}).join('')+'</tr>';}));
+  var dl=s.daily||[]; document.getElementById('daily').innerHTML=dl.length?tbl(['วัน NY','AI','RANDOM','TREND','REVERSE','FADE-TREND'],dl.map(function(d){return '<tr><td>'+d.day+'</td>'+['AI','RND','TRD','REV','FTR'].map(function(k){var x=d[k];return '<td class="'+cls(x.sumR)+'">'+(x.n?(x.sumR>0?'+':'')+x.sumR+'R ('+x.n+')':'-')+'</td>';}).join('')+'</tr>';})):'<div class="sub">ยังไม่มีไม้ที่ปิด</div>';
   document.getElementById('sCalls').innerHTML='<div class="big">'+s.ai.calls+'<span class="sub"> / '+s.cfg.aiLimit+' calls</span></div><div class="sub">error '+s.ai.errors+' | สัญญาณสะสม '+s.ai.signals+' | min conf '+s.cfg.minConf+'<br>'+esc(s.cfg.exits)+(s.ai.lastErr?'<br><span class="dn">'+esc(s.ai.lastErr)+'</span>':'')+'</div>';
   var A=s.books.AI, R=s.books.REV, N=s.books.RND, T=s.books.TRD, v, nd=(s.dayScore&&s.dayScore.AI)?s.dayScore.AI.up+s.dayScore.AI.down:0;
   if (A.n<60 || nd<10) v='ยังตัดสินไม่ได้: AI book มี '+A.n+' ไม้ / '+nd+' วันเทรด (ต้องการอย่างน้อย 60 ไม้ และ 10 วัน) - ห้ามเปิด LIVE จนกว่าจะผ่าน';
