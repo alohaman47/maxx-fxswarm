@@ -8,7 +8,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.1.1';
+const VERSION = 'v1.2.0';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -31,8 +31,9 @@ const CFG = {
   batchSize: Math.max(1, Math.round(num('BATCH_SIZE', 5))),
   aiGapMs: num('AI_GAP_MS', 5000),
   aiDailyLimit: num('AI_DAILY_LIMIT', 900),
-  aiStartNY: num('AI_START_NY', 3),
-  aiEndNY: num('AI_END_NY', 12),
+  aiStartNY: num('AI_START_NY', 0),
+  aiEndNY: num('AI_END_NY', 24),
+  aiSkipNY: String(env('AI_SKIP_NY', '16-19')), // NY hours to skip: after NY close + rollover (wide spreads). '' = none
   aiBars: Math.round(num('AI_BARS', 20)),
   signalMaxAgeMin: num('SIGNAL_MAX_AGE_MIN', 10),
   slAtr: num('SL_ATR', 1.0),
@@ -75,7 +76,13 @@ function aiWindowOpen() {
   const n = nyParts();
   if (n.wd === 'Sat' || n.wd === 'Sun') return false;
   const h = n.hour + n.min / 60;
-  return h >= CFG.aiStartNY && h < CFG.aiEndNY;
+  if (n.wd === 'Fri' && h >= 16) return false;          // weekend gap risk
+  if (!(h >= CFG.aiStartNY && h < CFG.aiEndNY)) return false;
+  for (const r of CFG.aiSkipNY.split(',').map(x => x.trim()).filter(Boolean)) {
+    const [a, b] = r.split('-').map(Number);
+    if (isFinite(a) && isFinite(b) && h >= a && h < b) return false;
+  }
+  return true;
 }
 
 // ---------------- state ----------------
@@ -244,7 +251,9 @@ Return exactly one entry per pair given.`;
 
 function buildPrompt(syms) {
   const ny = nyParts();
-  let out = `Time now New York ${ny.day} ${String(ny.hour).padStart(2, '0')}:${String(ny.min).padStart(2, '0')}\n`;
+  const hh = ny.hour;
+  const sess = hh >= 19 || hh < 3 ? 'Asia/Tokyo session (usually quieter, JPY/AUD/NZD most active)' : hh < 8 ? 'London session' : hh < 12 ? 'London-New York overlap' : 'New York afternoon';
+  let out = `Time now New York ${ny.day} ${String(ny.hour).padStart(2, '0')}:${String(ny.min).padStart(2, '0')} | ${sess}\n`;
   for (const s of syms) {
     const p = S.pairs[s]; const f = features(p); const nn = nextNewsFor(s);
     out += `\n=== ${s} ===\nATR14 ${p.atr.toFixed(p.d)} | spread ${f.sprAtr} ATR | ${f.trend} | EMA20 slope ${f.slope} ATR per 5 bars | RSI14 ${f.rsi} | position in 20-bar range ${f.pos}\n`;
@@ -506,7 +515,7 @@ app.get('/api/state', auth, (req, res) => {
   const sum = (st) => ({ n: st.n, win: st.n ? +(100 * st.w / st.n).toFixed(1) : 0, pf: pf(st), sumR: +st.sumR.toFixed(2), avgR: st.n ? +(st.sumR / st.n).toFixed(3) : 0 });
   res.json({
     version: VERSION, provider: PROVIDER, model: MODEL, aiMode: PROVIDER === 'mock' ? 'mock' : 'live', paused: S.paused,
-    cfg: { minConf: CFG.minConf, virtMinConf: CFG.virtMinConf, batch: CFG.batchSize, window: `${CFG.aiStartNY}-${CFG.aiEndNY} NY`, aiLimit: CFG.aiDailyLimit,
+    cfg: { minConf: CFG.minConf, virtMinConf: CFG.virtMinConf, batch: CFG.batchSize, window: `${CFG.aiStartNY}-${CFG.aiEndNY} NY` + (CFG.aiSkipNY ? ` ยกเว้น ${CFG.aiSkipNY}` : ''), aiLimit: CFG.aiDailyLimit,
       exits: `SL ${CFG.slAtr} / BE ${CFG.beAtr} / trail ${CFG.trailStartAtr} (dist ${CFG.trailDistAtr}) / TP ${CFG.tpAtr} ATR / ${CFG.maxHoldBars} bars` },
     windowOpen: aiWindowOpen(), ny: nyParts(),
     ai: S.ai, ea: { ...S.ea, ageSec: S.ea.lastAt ? Math.round((Date.now() - S.ea.lastAt) / 1000) : null },
