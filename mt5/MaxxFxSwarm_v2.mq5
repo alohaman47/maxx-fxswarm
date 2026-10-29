@@ -19,7 +19,7 @@ input long   InpMagic          = 600200;                            // Magic num
 input string InpSymbols        = "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,USDCHF,NZDUSD,EURGBP,EURJPY,GBPJPY,AUDJPY,EURAUD,EURCHF,GBPCHF,CADJPY,CHFJPY,NZDJPY,AUDCAD,AUDNZD,GBPAUD,GBPCAD,EURCAD,EURNZD,GBPNZD,AUDCHF";
 input string InpSuffix         = "";                                // Broker symbol suffix, e.g. ".a"
 input ENUM_TIMEFRAMES InpTF    = PERIOD_M15;                        // Signal timeframe
-input int    InpBarsToSend     = 60;                                // Closed bars sent per pair
+input int    InpBarsToSend     = 300;                               // Closed bars sent per pair
 input int    InpATRPeriod      = 14;                                // ATR period
 //--- sizing
 input double InpRiskUSD        = 5.0;                               // Risk per trade in USD at the 1 ATR stop
@@ -42,8 +42,8 @@ input int    InpMaxHoldBars    = 32;                                // Time stop
 input bool   InpFlipOnOpposite = true;                              // Opposite signal closes and reverses
 //--- time
 input int    InpServerMinusNY  = 7;                                 // Server time minus New York time (hours)
-input int    InpEntryStartNY   = 3;                                 // Entries allowed from (NY hour)
-input int    InpEntryEndNY     = 12;                                // Entries allowed until (NY hour)
+input int    InpEntryStartNY   = 0;                                 // Entries allowed from (NY hour)
+input int    InpEntryEndNY     = 24;                                // Entries allowed until (NY hour)
 input int    InpFridayFlatNY   = 16;                                // Friday: close all from this NY hour
 input int    InpPollSec        = 3;                                 // Command poll interval
 input int    InpSlippagePts    = 20;                                // Max slippage in points
