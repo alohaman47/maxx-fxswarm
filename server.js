@@ -5,10 +5,11 @@
 // (AI, REVERSE, calibration by confidence) so we can prove whether the AI has an edge.
 
 const express = require('express');
+const TECH = require('./techniques');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.4.0';
+const VERSION = 'v1.5.0';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -42,6 +43,9 @@ const CFG = {
   trailDistAtr: num('TRAIL_DIST_ATR', 1.0),
   tpAtr: num('TP_ATR', 3.0),
   maxHoldBars: Math.round(num('MAX_HOLD_BARS', 32)),
+  serverMinusNY: num('SERVER_MINUS_NY', 7),
+  commPips: num('COMMISSION_PIPS', 0.7), // Razor ~$7/lot round trip, not in the quoted spread
+  techOn: env('TECH_LAB', '1') === '1',
   cmdTtlSec: num('CMD_TTL_SEC', 180),
   newsOn: env('NEWS_GUARD', '1') === '1',
   newsBefore: num('NEWS_BEFORE_MIN', 15),
@@ -87,7 +91,9 @@ function aiWindowOpen() {
 
 // ---------------- state ----------------
 const newStats = () => ({ n: 0, w: 0, sumR: 0, gp: 0, gl: 0 });
-const BOOKS = ['AI', 'REV', 'RND', 'TRD', 'FTR'];
+const AI_BOOKS = ['AI', 'REV', 'RND', 'TRD', 'FTR'];
+const BOOKS = AI_BOOKS.concat(TECH.CODES);
+const BOOK_INFO = Object.assign({ AI: { name: 'AI (Gemini)', fam: 'ai' }, REV: { name: 'REVERSE AI', fam: 'ai' }, RND: { name: 'RANDOM', fam: 'control' }, TRD: { name: 'TREND (AI timing)', fam: 'control' }, FTR: { name: 'FADE-TREND (AI timing)', fam: 'control' } }, TECH.BOOK_INFO);
 const SESSIONS = ['ASIA', 'LON', 'OVL', 'NYPM'];
 const sessOf = (h) => (h >= 19 || h < 3) ? 'ASIA' : h < 8 ? 'LON' : h < 12 ? 'OVL' : 'NYPM';
 const BUCKETS = ['<60', '60-69', '70-79', '80-89', '90+'];
@@ -96,11 +102,11 @@ const bucketOf = (c) => c < 60 ? '<60' : c < 70 ? '60-69' : c < 80 ? '70-79' : c
 let S = {
   paused: false,
   pairs: {},                       // sym -> {d, atr, spr, bars:[{t,o,h,l,c}], lastT}
-  books: { AI: {}, REV: {}, RND: {}, TRD: {}, FTR: {} }, // sym -> open virtual trade
+  books: Object.fromEntries(BOOKS.map(b => [b, {}])), // sym -> open virtual trade
   calibOpen: [],
   daily: {},                       // NY day -> book -> {n, sumR}
   sigDaily: {},                    // NY day -> {asked, signals, taken}
-  stats: { AI: newStats(), REV: newStats(), RND: newStats(), TRD: newStats(), FTR: newStats(), calib: Object.fromEntries(BUCKETS.map(b => [b, newStats()])),
+  stats: { ...Object.fromEntries(BOOKS.map(b => [b, newStats()])), calib: Object.fromEntries(BUCKETS.map(b => [b, newStats()])),
     side: { BUY: newStats(), SELL: newStats() } },
   closed: [],
   decisions: [],
@@ -191,7 +197,8 @@ function openVirtual(book, sym, dir, conf, why, p) {
   const atr = p.atr; const last = p.bars[p.bars.length - 1];
   const tr = { id: ++S.tradeSeq, book, sym, dir, conf, why, entry: last.c, atr,
     sl: last.c - dir * CFG.slAtr * atr, sl0: last.c - dir * CFG.slAtr * atr, tp: last.c + dir * CFG.tpAtr * atr,
-    maxFav: 0, bars: 0, openT: last.t, openAt: Date.now(), sess: sessOf(nyParts().hour), sprR: p.spr / (CFG.slAtr * atr) };
+    maxFav: 0, bars: 0, openT: last.t, openAt: Date.now(), sess: sessOf(nyParts().hour),
+    sprR: (p.spr + CFG.commPips * (sym.includes('JPY') ? 0.01 : 0.0001)) / (CFG.slAtr * atr) };
   return tr;
 }
 function closeVirtual(tr, price, reason) {
@@ -462,6 +469,17 @@ function handleSignals(syms, res) {
   }
 }
 
+// ---------------- technique lab (mechanical books, no AI) ----------------
+function runTech(sym) {
+  const p = S.pairs[sym]; if (!p || p.bars.length < 60 || !(p.atr > 0)) return;
+  if (S.paused || !aiWindowOpen() || newsFor(sym)) return;          // same session/news rules as the AI books
+  if (p.spr / p.atr > 0.3) return;                                  // same spread rule the AI was given
+  for (const sig of TECH.evalAll(p.bars, { offsetH: CFG.serverMinusNY })) {
+    if (S.books[sig.code][sym]) continue;                           // one trade per pair per book
+    S.books[sig.code][sym] = openVirtual(sig.code, sym, sig.dir, 0, TECH.BOOK_INFO[sig.code].name, p);
+  }
+}
+
 // ---------------- HTTP ----------------
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -488,8 +506,9 @@ app.post('/api/bar', auth, (req, res) => {
     if (!bars.length || !(+q.atr > 0)) continue;
     const prev = S.pairs[sym]; const lastT = prev ? prev.lastT : 0;
     const newBars = bars.filter(x => x.t > lastT);
-    S.pairs[sym] = { d: +q.d || 5, atr: +q.atr, spr: +q.spr || 0, bars: bars.slice(-120), lastT: bars[bars.length - 1].t };
+    S.pairs[sym] = { d: +q.d || 5, atr: +q.atr, spr: +q.spr || 0, bars: bars.slice(-400), lastT: bars[bars.length - 1].t };
     if (prev && newBars.length) stepAllVirtual(sym, newBars);
+    if (newBars.length && CFG.techOn) runTech(sym);
     if (newBars.length && bars.length >= 30) fresh.push(sym);
   }
   let note = 'stored';
@@ -531,6 +550,9 @@ app.get('/api/state', auth, (req, res) => {
     ai: S.ai, ea: { ...S.ea, ageSec: S.ea.lastAt ? Math.round((Date.now() - S.ea.lastAt) / 1000) : null },
     books: Object.fromEntries(BOOKS.map(b => [b, sum(S.stats[b])])),
     daily: Object.keys(S.daily).sort().reverse().slice(0, 14).map(day => ({ day, ...Object.fromEntries(BOOKS.map(b => [b, S.daily[day][b] ? { n: S.daily[day][b].n, sumR: +S.daily[day][b].sumR.toFixed(2) } : { n: 0, sumR: 0 }])) })),
+    lab: BOOKS.map(b => ({ code: b, name: BOOK_INFO[b].name, fam: BOOK_INFO[b].fam, open: Object.keys(S.books[b] || {}).length, ...sum(S.stats[b]),
+      days: (() => { const ds = Object.values(S.daily).map(d => d[b]).filter(x => x && x.n); return { up: ds.filter(x => x.sumR > 0).length, down: ds.filter(x => x.sumR <= 0).length }; })(),
+      sess: Object.fromEntries(SESSIONS.map(x => [x, (S.sess[b] && S.sess[b][x]) ? sum(S.sess[b][x]) : sum(newStats())])) })).sort((a, b) => b.sumR - a.sumR),
     sess: Object.fromEntries(BOOKS.map(b => [b, Object.fromEntries(SESSIONS.map(x => [x, (S.sess[b] && S.sess[b][x]) ? sum(S.sess[b][x]) : sum(newStats())]))])),
     dayScore: Object.fromEntries(BOOKS.map(b => { const days = Object.values(S.daily).map(d => d[b]).filter(x => x && x.n); return [b, { up: days.filter(x => x.sumR > 0).length, down: days.filter(x => x.sumR <= 0).length }]; })),
     sigDaily: Object.keys(S.sigDaily).sort().reverse().slice(0, 14).map(day => ({ day, ...S.sigDaily[day] })),

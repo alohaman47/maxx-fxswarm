@@ -59,3 +59,14 @@ AI ตัวอื่นแทน Gemini ได้: `AI_PROVIDER=openai` + `OPEN
 `GET /health` · `POST /api/bar` (EA) · `GET /api/cmd?since=N` (EA) · `POST /api/ack` (EA) · `GET /api/state` · `POST /api/pause|resume|closeall` · `GET /api/log?f=trades|decisions|acks` — ทุกตัวยกเว้น /health ต้องส่ง header `x-maxx-key`
 
 หมายเหตุ: Gemini ฟรีมีโควต้าต่อวัน (เปลี่ยนบ่อย ดูใน AI Studio) ถ้าโดน 429 server จะสลับ key ถัดไปเอง ถ้าหมดทุก key รอบนั้นข้ามไป
+
+## Technique lab (v1.5.0)
+10 เทคนิคยอดนิยม (`techniques.js`) รันเป็น virtual book บน server ทุกแท่ง M15 ไม่ใช้ AI: EMA 9/21, MACD+EMA200, Supertrend 10/3, Ichimoku TK, Donchian 20, London Breakout, Bollinger Fade, RSI 30/70, Stochastic 14/3/3, Pivot S1/R1
+- กฎออกเดียวกับ AI book, หักสเปรด + ค่าคอม Razor (`COMMISSION_PIPS`, default 0.7), ช่วงเวลา/ข่าว/สเปรดเหมือน AI
+- EA ต้องตั้ง `InpBarsToSend` = 300 (MACD/EMA200, Ichimoku ต้องการแท่งย้อนหลัง)
+- `TECH_LAB=0` ปิดได้, `SERVER_MINUS_NY` (7) ใช้คำนวณกรอบเอเชีย/วัน pivot
+
+### Backtest ย้อนหลัง (กฎเดียวกันเป๊ะ)
+1. MT5: รันสคริปต์ `mt5/MAXX_FXSWARM_EXPORT_v1.mq5` → ไฟล์อยู่ใน `MQL5/Files/FXSWARM/`
+2. `node backtest.js <โฟลเดอร์ csv> --split 2026-01-01 --offset 7 --comm 0.7`
+เกณฑ์ผ่าน: IS n ≥ 100, avg R > 0, t รายวัน ≥ 2.5, OOS n ≥ 50 และ avg R > 0, ทุกปีเป็นบวก
