@@ -5,7 +5,7 @@
 //| All money rules live HERE, the AI only picks pair + direction.   |
 //+------------------------------------------------------------------+
 #property copyright "MAXX"
-#property version   "2.10"
+#property version   "2.11"
 #property description "MAXX FX SWARM v2 - FX AI module + GOLD module (ATLAS v6 / CENTAUR)"
 
 #include <Trade\Trade.mqh>
@@ -57,6 +57,7 @@ input bool   InpGoldAllowLive  = false;                             // Gold refu
 input bool   InpGoldPaper      = true;                              // Gold PAPER mode: virtual account, never sends orders
 input double InpGoldPaperStart = 10000.0;                           // Paper starting balance (USD)
 input double InpGoldPaperComm  = 3.57;                              // Paper commission per lot per side (USD, Pepperstone tester)
+input bool   InpGoldPaperReset = false;                             // true = wipe paper account and start fresh at next load (set back to false)
 //--- GOLD engine = CLAUDE_ATLAS_v6 frozen contest config
 input double InpG_TargetVol    = 0.010;                             // daily vol target (fraction)
 input double InpG_LevCap       = 2.0;                               // max exposure / equity
@@ -975,9 +976,18 @@ void GoldRebalance()
 }
 
 // same flow as the original OnTick(), driven by new M15 bars of the gold symbol
+// the original EA only acted on real ticks; the timer here must not act while the market is closed
+bool GoldMarketLive()
+{
+   if(IsTester()) return true;
+   long last = SymbolInfoInteger(g_gSym, SYMBOL_TIME);
+   return (last > 0 && (long)TimeTradeServer() - last < 180);
+}
+
 void GoldStep()
 {
    if(!g_goldOn || g_gSym == "") return;
+   if(!GoldMarketLive()) return;
    if(GP()) { PaperAccrueSwap(); PaperCheckSL(false); }
    if(!GoldNewBar()) return;
    if(GP()) PaperCheckSL(true);
@@ -1111,6 +1121,20 @@ bool GoldInit()
    if(g_hEmaD1 == INVALID_HANDLE || g_hAtrD1 == INVALID_HANDLE || g_hAtrM15 == INVALID_HANDLE) { Print("GOLD: indicator handle failed"); return false; }
    // same HWM global-variable name as CLAUDE_ATLAS_v6 so a running test keeps its high-water mark
    g_gHwmName = GP() ? PGV("HWM") : ((InpGoldMode == 1) ? CenGV("HWM") : "ATLAS_HWM_" + g_gSym + "_" + IntegerToString((int)InpGoldMagic));
+   if(GP() && InpGoldPaperReset)
+   {
+      string pfx[3];
+      pfx[0] = "CENP_" + IntegerToString((int)InpGoldMagic) + "_";
+      pfx[1] = "CENPAPER_";
+      pfx[2] = "";
+      for(int i = GlobalVariablesTotal() - 1; i >= 0; i--)
+      {
+         string nm = GlobalVariableName(i);
+         if(StringFind(nm, pfx[0]) == 0 || StringFind(nm, pfx[1]) == 0) GlobalVariableDel(nm);
+      }
+      FileDelete(PaperFile());
+      Print("GOLD paper account RESET - set 'wipe paper account' back to false");
+   }
    if(GP()) PaperLoad();
    if(!GlobalVariableCheck(g_gHwmName)) GlobalVariableSet(g_gHwmName, GP() ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY));
    ArrayResize(g_rWin, 0);   // R window starts empty after restart (as CENTAUR_v1)
