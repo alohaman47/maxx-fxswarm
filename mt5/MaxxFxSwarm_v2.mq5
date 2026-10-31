@@ -5,7 +5,7 @@
 //| All money rules live HERE, the AI only picks pair + direction.   |
 //+------------------------------------------------------------------+
 #property copyright "MAXX"
-#property version   "2.00"
+#property version   "2.01"
 #property description "MAXX FX SWARM v2 - FX AI module + GOLD module (ATLAS v6 / CENTAUR)"
 
 #include <Trade\Trade.mqh>
@@ -515,6 +515,8 @@ void PollCommands()
 //|   CENTAUR_v1 (CENTAUR_<sym>_<magic>_...).                        |
 //| Only symbol/magic plumbing differs from the original files.      |
 //+------------------------------------------------------------------+
+bool     g_fxOn         = true;    // effective switches (tester forces FX off, GOLD on)
+bool     g_goldOn       = false;
 CTrade   gtrade;
 string   g_gSym         = "";
 int      g_hEmaD1       = INVALID_HANDLE;
@@ -703,12 +705,20 @@ void GoldReport(string what)
         ",\"t\":" + IntegerToString((long)TimeCurrent()) + ",\"msg\":\"" + m + "\"}", resp);
 }
 
+datetime g_gDiagDay = 0;
+void GoldDiag(string why)
+{
+   datetime d = iTime(g_gSym, PERIOD_D1, 0);
+   if(d == g_gDiagDay) return;          // one message per day
+   g_gDiagDay = d;
+   Print("GOLD skip ", TimeToString(TimeCurrent()), ": ", why);
+}
 void GoldRebalance()
 {
    double ema, atr;
-   if(!GoldD1(ema, atr)) return;
+   if(!GoldD1(ema, atr)) { GoldDiag("D1 EMA/ATR not ready (need ~100 D1 bars of history)"); return; }
    double rv = GoldRV();
-   if(rv <= 0.0) return;
+   if(rv <= 0.0) { GoldDiag("realized vol not ready"); return; }
 
    // spread guard: wait up to 4 M15 bars, then force (must trade daily)
    double spreadPts = (double)SymbolInfoInteger(g_gSym, SYMBOL_SPREAD);
@@ -775,7 +785,7 @@ void GoldRebalance()
 // same flow as the original OnTick(), driven by new M15 bars of the gold symbol
 void GoldStep()
 {
-   if(!InpGoldOn || g_gSym == "") return;
+   if(!g_goldOn || g_gSym == "") return;
    if(!GoldNewBar()) return;
 
    if(g_gTokenPos && GoldPos() != 0 && iTime(g_gSym, PERIOD_M15, 0) > g_gEntryBar)
@@ -825,7 +835,7 @@ string GoldDealsJson()
 
 void GoldWatchPush()
 {
-   if(!InpGoldOn || IsTester() || StringFind(InpURL, "http") != 0) return;
+   if(!g_goldOn || IsTester() || StringFind(InpURL, "http") != 0) return;
    if(TimeCurrent() - g_gLastWatch < 300) return;
    g_gLastWatch = TimeCurrent();
    double fl = 0.0;
@@ -856,8 +866,8 @@ void GoldWatchPush()
 
 bool GoldInit()
 {
-   if(!InpGoldOn) return true;
-   if(!InpGoldAllowLive && AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL)
+   if(!g_goldOn) return true;
+   if(!IsTester() && !InpGoldAllowLive && AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL)
    {
       Print("GOLD: REAL account blocked. Set InpGoldAllowLive=true to override.");
       return false;
@@ -885,15 +895,26 @@ bool GoldInit()
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   if(StringFind(InpURL, "http") != 0 && InpFxOn && !IsTester()) { Print("Set InpURL to your Railway URL (starting with https)"); return INIT_PARAMETERS_INCORRECT; }
-   if(!InpFxOn && !InpGoldOn) { Print("Both modules are off"); return INIT_PARAMETERS_INCORRECT; }
+   g_fxOn   = InpFxOn;
+   g_goldOn = InpGoldOn;
+   if(IsTester())
+   {
+      // FX module needs the live server + AI and cannot run in the Strategy Tester
+      if(g_fxOn) Print("TESTER: FX module disabled automatically (needs live server)");
+      g_fxOn = false;
+      if(!g_goldOn) Print("TESTER: GOLD module enabled automatically");
+      g_goldOn = true;
+      if(_Symbol != InpGoldSymbol + InpSuffix) Print("TESTER WARNING: tester symbol is ", _Symbol, " - select ", InpGoldSymbol + InpSuffix, " in the tester for correct results");
+   }
+   if(StringFind(InpURL, "http") != 0 && g_fxOn && !IsTester()) { Print("Set InpURL to your Railway URL (starting with https)"); return INIT_PARAMETERS_INCORRECT; }
+   if(!g_fxOn && !g_goldOn) { Print("Both modules are off"); return INIT_PARAMETERS_INCORRECT; }
    if(!GoldInit()) return INIT_FAILED;
    g_pfx = "FXSW_" + IntegerToString(InpMagic) + "_";
    trade.SetExpertMagicNumber((ulong)InpMagic);
    trade.SetDeviationInPoints(InpSlippagePts);
 
    string parts[];
-   int n = InpFxOn ? StringSplit(InpSymbols, ',', parts) : 0;
+   int n = g_fxOn ? StringSplit(InpSymbols, ',', parts) : 0;
    ArrayResize(g_base, 0); ArrayResize(g_sym, 0); ArrayResize(g_atr, 0);
    g_n = 0;
    for(int i = 0; i < n; i++)
@@ -911,7 +932,7 @@ int OnInit()
       g_base[g_n] = b; g_sym[g_n] = s; g_atr[g_n] = h;
       g_n++;
    }
-   if(InpFxOn && g_n == 0) { Print("No symbols loaded - check InpSymbols / InpSuffix"); return INIT_FAILED; }
+   if(g_fxOn && g_n == 0) { Print("No symbols loaded - check InpSymbols / InpSuffix"); return INIT_FAILED; }
 
    if(GlobalVariableCheck(g_pfx + "LASTCMD")) g_lastCmd = (long)GlobalVariableGet(g_pfx + "LASTCMD");
 
@@ -925,7 +946,7 @@ int OnInit()
    }
 
    EventSetTimer(1);
-   Print("MAXX FX SWARM v2 | FX ", (InpFxOn ? "on " + IntegerToString(g_n) + " pairs" : "off"), " DryRun=", InpDryRun, " | GOLD ", (InpGoldOn ? GoldLabel() : "off"));
+   Print("MAXX FX SWARM v2 | FX ", (g_fxOn ? "on " + IntegerToString(g_n) + " pairs" : "off"), " DryRun=", InpDryRun, " | GOLD ", (g_goldOn ? GoldLabel() : "off"));
    return INIT_SUCCEEDED;
 }
 
@@ -933,7 +954,7 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    for(int i = 0; i < g_n; i++) IndicatorRelease(g_atr[i]);
-   if(InpGoldOn) CenPersist();
+   if(g_goldOn) CenPersist();
    if(g_hEmaD1 != INVALID_HANDLE) IndicatorRelease(g_hEmaD1);
    if(g_hAtrD1 != INVALID_HANDLE) IndicatorRelease(g_hAtrD1);
    if(g_hAtrM15 != INVALID_HANDLE) IndicatorRelease(g_hAtrM15);
@@ -944,7 +965,7 @@ void OnTick() { GoldStep(); }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
 {
-   if(!InpGoldOn || InpGoldMode != 1) return;
+   if(!g_goldOn || InpGoldMode != 1) return;
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
    if(trans.deal == 0) return;
    if(!HistoryDealSelect(trans.deal)) return;
@@ -968,7 +989,7 @@ void OnTimer()
 {
    GoldStep();
    GoldWatchPush();
-   if(!InpFxOn) { Comment("MAXX v2 | GOLD ", GoldLabel(), " | ", g_gStatus); return; }
+   if(!g_fxOn) { Comment("MAXX v2 | GOLD ", GoldLabel(), " | ", g_gStatus); return; }
    // 1) day guard
    int tradesToday = 0;
    double pl = DayPL(tradesToday);
@@ -998,7 +1019,7 @@ void OnTimer()
       PollCommands();
    }
 
-   Comment("MAXX FX SWARM v2  ", (InpDryRun ? "[DRY RUN]" : "[LIVE]"), (InpGoldOn ? "  | GOLD " + GoldLabel() + ": " + g_gStatus : ""),
+   Comment("MAXX FX SWARM v2  ", (InpDryRun ? "[DRY RUN]" : "[LIVE]"), (g_goldOn ? "  | GOLD " + GoldLabel() + ": " + g_gStatus : ""),
            "\nPairs ", g_n, " | Positions ", CountMagicPositions(), "/", InpMaxPositions,
            " | Trades today ", tradesToday, "/", InpMaxTradesDay,
            "\nDay P/L ", DoubleToString(pl, 2), "  (stop -", DoubleToString(InpDayLossUSD, 0), " / +", DoubleToString(InpDayProfitUSD, 0), ")",
