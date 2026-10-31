@@ -5,7 +5,7 @@
 //| All money rules live HERE, the AI only picks pair + direction.   |
 //+------------------------------------------------------------------+
 #property copyright "MAXX"
-#property version   "2.12"
+#property version   "2.13"
 #property description "MAXX FX SWARM v2 - FX AI module + GOLD module (ATLAS v6 / CENTAUR)"
 
 #include <Trade\Trade.mqh>
@@ -980,8 +980,16 @@ void GoldRebalance()
 bool GoldMarketLive()
 {
    if(IsTester()) return true;
+   // hard weekend block by GMT clock (gold closes ~Fri 21:00 GMT, reopens ~Sun 22:00 GMT)
+   MqlDateTime g;
+   TimeToStruct(TimeGMT(), g);
+   if(g.day_of_week == 6) return false;
+   if(g.day_of_week == 0 && g.hour < 22) return false;
+   if(g.day_of_week == 5 && g.hour >= 21) return false;
+   // and no fresh tick in the last 3 minutes (holidays, outages); compare in GMT on both sides
    long last = SymbolInfoInteger(g_gSym, SYMBOL_TIME);
-   return (last > 0 && (long)TimeTradeServer() - last < 180);
+   long lagSrvGmt = (long)TimeTradeServer() - (long)TimeGMT();
+   return (last > 0 && (long)TimeGMT() - (last - lagSrvGmt) < 180);
 }
 
 void GoldStep()
