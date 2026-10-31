@@ -5,7 +5,7 @@
 //| All money rules live HERE, the AI only picks pair + direction.   |
 //+------------------------------------------------------------------+
 #property copyright "MAXX"
-#property version   "2.11"
+#property version   "2.12"
 #property description "MAXX FX SWARM v2 - FX AI module + GOLD module (ATLAS v6 / CENTAUR)"
 
 #include <Trade\Trade.mqh>
@@ -1060,8 +1060,8 @@ string PaperDealsJson()
 void GoldWatchPush()
 {
    if(!g_goldOn || IsTester() || StringFind(InpURL, "http") != 0) return;
-   if(TimeCurrent() - g_gLastWatch < 300) return;
-   g_gLastWatch = TimeCurrent();
+   if(g_gLastWatch > 0 && TimeLocal() - g_gLastWatch < 300) return;   // TimeLocal keeps moving on weekends
+   g_gLastWatch = TimeLocal();
    bool paper = GP();
    double fl = 0.0;
    string opn = "[";
