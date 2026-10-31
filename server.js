@@ -9,7 +9,7 @@ const TECH = require('./techniques');
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = 'v1.8.0';
+const VERSION = 'v1.9.0';
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const num = (k, d) => { const v = parseFloat(env(k, '')); return isFinite(v) ? v : d; };
 const list = (k) => String(env(k, '')).split(',').map(s => s.trim()).filter(Boolean);
@@ -556,7 +556,7 @@ function watchStats(w) {
   if (weekdays >= 5 && daysTraded / weekdays < 0.9) flags.push({ lvl: 'warn', msg: `เทรด ${daysTraded}/${weekdays} วันทำการ (ต่ำกว่า 90%)` });
   if (topHour && ins.length >= 10 && topHour[1] / ins.length < 0.8) flags.push({ lvl: 'warn', msg: `เวลาเข้าไม้ไม่คงที่ (ชั่วโมงหลัก ${topHour[0]}:00 แค่ ${(100 * topHour[1] / ins.length).toFixed(0)}%)` });
   return {
-    label: w.label, magic: w.magic, acct: w.acct, demo: w.demo, updated: w.at, ageMin: Math.round((Date.now() - w.at) / 60000),
+    label: w.label, magic: w.magic, acct: w.acct, demo: w.demo, paper: !!w.paper, updated: w.at, ageMin: Math.round((Date.now() - w.at) / 60000),
     startBal: w.startBal, balance: w.balance, equity: w.equity, floating: w.floating, open: w.open || [],
     net: +(bal - (w.startBal || 10000)).toFixed(2), ret: +((bal / (w.startBal || 10000) - 1) * 100).toFixed(2),
     trades: trades.length, win: trades.length ? +(100 * trades.filter(t => t.net > 0).length / trades.length).toFixed(1) : 0,
@@ -687,7 +687,7 @@ app.post('/api/watch', auth, (req, res) => {
     const key = acct + ':' + String(sd.label || sd.magic);
     const prev = S.watch[key] || {};
     const eq = (prev.eq || []).concat([{ ts: Date.now(), e: +b.equity || 0 }]).slice(-6000);
-    S.watch[key] = { label: String(sd.label || ''), magic: +sd.magic || 0, acct, demo: !!b.demo, at: Date.now(), now: +b.now || Math.floor(Date.now() / 1000),
+    S.watch[key] = { label: String(sd.label || ''), magic: +sd.magic || 0, acct, demo: !!b.demo, paper: !!b.paper, at: Date.now(), now: +b.now || Math.floor(Date.now() / 1000),
       start: +b.start || 0, startBal: +b.startBal || 10000, balance: +b.balance || 0, equity: +b.equity || 0, floating: +sd.floating || 0,
       open: Array.isArray(sd.open) ? sd.open : [], deals: Array.isArray(sd.deals) ? sd.deals : [], eq };
   }

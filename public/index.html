@@ -157,7 +157,7 @@ function watchLoad(){api('/api/watch').then(function(w){var el=document.getEleme
   document.getElementById('watchNote').textContent='เส้นตก: DD เกิน '+w.failDD+'% | ไม่มีไม้ใหม่เกิน 30 ชม. ในวันทำการ | เตือน: เทรดไม่ถึง 90% ของวันทำการ, เวลาเข้าไม้ไม่คงที่ | เวลาในตาราง = เวลา server MT5 | Equity DD = ทั้งบัญชี นับตั้งแต่ WATCH เริ่ม';
   el.innerHTML=w.soldiers.map(function(s){var st={ok:'ผ่าน',warn:'เฝ้าดู',fail:'ตกเส้น'}[s.status];
     return '<div class="wcard '+s.status+'"><div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:18px">'+esc(s.label)+'</b><span class="chip '+(s.status==='ok'?'ok':s.status==='warn'?'warn':'bad')+'">'+st+'</span></div>'+
-    '<div class="sub">บัญชี '+esc(s.acct)+(s.demo?' (demo)':' (REAL)')+' | magic '+s.magic+' | อัปเดต '+s.ageMin+' นาทีก่อน</div>'+spark(s.curve)+
+    '<div class="sub">'+(s.paper?'บัญชีจำลองในแอป (paper) เริ่ม $'+s.startBal:'บัญชี '+esc(s.acct)+(s.demo?' (demo)':' (REAL)'))+' | magic '+s.magic+' | อัปเดต '+s.ageMin+' นาทีก่อน</div>'+spark(s.curve)+
     '<div class="kv"><div>กำไรสุทธิ<b class="'+cls(s.net)+'">'+(s.net>0?'+':'')+s.net+'</b></div><div>ผลตอบแทน<b class="'+cls(s.ret)+'">'+s.ret+'%</b></div><div>Equity<b>'+s.equity+'</b></div>'+
     '<div>DD ไม้ปิด<b class="'+(s.dd>w.failDD?'dn':'')+'">'+s.dd+'%</b></div><div>Equity DD<b class="'+(s.eqDD>w.failDD?'dn':'')+'">'+s.eqDD+'%</b></div><div>Recovery<b>'+s.recovery+'</b></div>'+
     '<div>ไม้<b>'+s.trades+'</b></div><div>Win / PF<b>'+s.win+'% / '+s.pf+'</b></div><div>ลอยอยู่<b class="'+cls(s.floating)+'">'+s.floating+'</b></div>'+

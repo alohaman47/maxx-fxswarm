@@ -5,7 +5,7 @@
 //| All money rules live HERE, the AI only picks pair + direction.   |
 //+------------------------------------------------------------------+
 #property copyright "MAXX"
-#property version   "2.01"
+#property version   "2.10"
 #property description "MAXX FX SWARM v2 - FX AI module + GOLD module (ATLAS v6 / CENTAUR)"
 
 #include <Trade\Trade.mqh>
@@ -53,7 +53,10 @@ input bool   InpGoldOn         = false;                             // GOLD modu
 input int    InpGoldMode       = 1;                                 // GOLD mode: 0 = ATLAS v6 exact, 1 = CENTAUR (v6 + Kimi armor)
 input string InpGoldSymbol     = "XAUUSD";                          // Gold symbol (suffix from InpSuffix is added)
 input long   InpGoldMagic      = 540001;                            // Gold magic (CENTAUR 540001, ATLAS v6 530006)
-input bool   InpGoldAllowLive  = false;                             // Gold refuses REAL accounts unless true
+input bool   InpGoldAllowLive  = false;                             // Gold refuses REAL accounts unless true (real-order mode only)
+input bool   InpGoldPaper      = true;                              // Gold PAPER mode: virtual account, never sends orders
+input double InpGoldPaperStart = 10000.0;                           // Paper starting balance (USD)
+input double InpGoldPaperComm  = 3.57;                              // Paper commission per lot per side (USD, Pepperstone tester)
 //--- GOLD engine = CLAUDE_ATLAS_v6 frozen contest config
 input double InpG_TargetVol    = 0.010;                             // daily vol target (fraction)
 input double InpG_LevCap       = 2.0;                               // max exposure / equity
@@ -630,7 +633,7 @@ bool GoldExplosion()
 }
 
 //--- CENTAUR_v1 armor2/3 (verbatim logic)
-string CenGV(const string suffix) { return "CENTAUR_" + g_gSym + "_" + IntegerToString((int)InpGoldMagic) + "_" + suffix; }
+string CenGV(const string suffix) { return (GP() ? "CENPAPER_" : "CENTAUR_") + g_gSym + "_" + IntegerToString((int)InpGoldMagic) + "_" + suffix; }
 void CenPersist()
 {
    if(InpGoldMode != 1) return;
@@ -693,6 +696,192 @@ void CenEvaluateArmor()
    CenPersist();
 }
 
+void CenOnClosed(const double pnl)
+{
+   if(InpGoldMode != 1) return;
+   if(g_openRiskMoney > 0.0)
+   {
+      CenAddClosedR(pnl / g_openRiskMoney);
+      g_openRiskMoney = 0.0;
+      CenEvaluateArmor();
+   }
+   CenPersist();
+}
+
+//+------------------------------------------------------------------+
+//| PAPER MODE (default): CENTAUR runs on a virtual $ account inside |
+//| this EA. It reads real XAUUSD prices but never sends an order,   |
+//| so it can share the VPS account with anything else. Sizing uses  |
+//| the virtual equity; fills at real ask/bid; SL checked every      |
+//| second + bar lows; swap from the symbol's real swap settings;    |
+//| commission per lot per side. Close events reach the armor in the |
+//| same order MT5 delivers them (after the handler returns).        |
+//+------------------------------------------------------------------+
+bool     g_pOpen     = false;
+double   g_pLot      = 0.0;
+double   g_pEntry    = 0.0;
+double   g_pSL       = 0.0;
+datetime g_pOTime    = 0;
+long     g_pPosId    = 0;
+double   g_pBal      = 0.0;
+double   g_pSwapAcc  = 0.0;
+datetime g_pSwapDay  = 0;
+double   g_pPend[];                 // close P/L waiting for the "transaction" step
+long     g_dT[];  long g_dPos[]; string g_dE[]; double g_dV[]; double g_dPx[]; double g_dPl[]; double g_dSw[]; double g_dCm[];
+int      g_dN        = 0;
+
+bool   GP() { return InpGoldPaper && !IsTester(); }
+string PGV(const string s) { return "CENP_" + IntegerToString((int)InpGoldMagic) + "_" + s; }
+string PaperFile() { return "CENTAUR_PAPER_" + IntegerToString((int)InpGoldMagic) + ".csv"; }
+
+void PaperSave()
+{
+   GlobalVariableSet(PGV("OPEN"), g_pOpen ? 1.0 : 0.0);
+   GlobalVariableSet(PGV("LOT"), g_pLot);
+   GlobalVariableSet(PGV("ENTRY"), g_pEntry);
+   GlobalVariableSet(PGV("SL"), g_pSL);
+   GlobalVariableSet(PGV("OTIME"), (double)g_pOTime);
+   GlobalVariableSet(PGV("POSID"), (double)g_pPosId);
+   GlobalVariableSet(PGV("BAL"), g_pBal);
+   GlobalVariableSet(PGV("SWAPACC"), g_pSwapAcc);
+   GlobalVariableSet(PGV("SWAPDAY"), (double)g_pSwapDay);
+   GlobalVariableSet(PGV("TOKEN"), g_gTokenPos ? 1.0 : 0.0);
+   GlobalVariableSet(PGV("ENTRYBAR"), (double)g_gEntryBar);
+   GlobalVariableSet(PGV("LASTREBAL"), (double)g_gLastRebal);
+}
+
+void PaperAddDeal(datetime t, long pos, string e, double v, double px, double pl, double sw, double cm)
+{
+   ArrayResize(g_dT, g_dN + 1); ArrayResize(g_dPos, g_dN + 1); ArrayResize(g_dE, g_dN + 1); ArrayResize(g_dV, g_dN + 1);
+   ArrayResize(g_dPx, g_dN + 1); ArrayResize(g_dPl, g_dN + 1); ArrayResize(g_dSw, g_dN + 1); ArrayResize(g_dCm, g_dN + 1);
+   g_dT[g_dN] = (long)t; g_dPos[g_dN] = pos; g_dE[g_dN] = e; g_dV[g_dN] = v; g_dPx[g_dN] = px; g_dPl[g_dN] = pl; g_dSw[g_dN] = sw; g_dCm[g_dN] = cm;
+   g_dN++;
+   int fh = FileOpen(PaperFile(), FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(fh != INVALID_HANDLE)
+   {
+      FileSeek(fh, 0, SEEK_END);
+      FileWriteString(fh, IntegerToString((long)t) + "," + IntegerToString(pos) + "," + e + "," + DoubleToString(v, 2) + "," +
+                      DoubleToString(px, 3) + "," + DoubleToString(pl, 2) + "," + DoubleToString(sw, 2) + "," + DoubleToString(cm, 2) + "\n");
+      FileClose(fh);
+   }
+}
+
+void PaperLoad()
+{
+   g_pOpen    = GlobalVariableCheck(PGV("OPEN")) && GlobalVariableGet(PGV("OPEN")) > 0.5;
+   g_pLot     = GlobalVariableCheck(PGV("LOT")) ? GlobalVariableGet(PGV("LOT")) : 0.0;
+   g_pEntry   = GlobalVariableCheck(PGV("ENTRY")) ? GlobalVariableGet(PGV("ENTRY")) : 0.0;
+   g_pSL      = GlobalVariableCheck(PGV("SL")) ? GlobalVariableGet(PGV("SL")) : 0.0;
+   g_pOTime   = GlobalVariableCheck(PGV("OTIME")) ? (datetime)GlobalVariableGet(PGV("OTIME")) : 0;
+   g_pPosId   = GlobalVariableCheck(PGV("POSID")) ? (long)GlobalVariableGet(PGV("POSID")) : 0;
+   g_pBal     = GlobalVariableCheck(PGV("BAL")) ? GlobalVariableGet(PGV("BAL")) : InpGoldPaperStart;
+   g_pSwapAcc = GlobalVariableCheck(PGV("SWAPACC")) ? GlobalVariableGet(PGV("SWAPACC")) : 0.0;
+   g_pSwapDay = GlobalVariableCheck(PGV("SWAPDAY")) ? (datetime)GlobalVariableGet(PGV("SWAPDAY")) : 0;
+   g_gTokenPos  = GlobalVariableCheck(PGV("TOKEN")) && GlobalVariableGet(PGV("TOKEN")) > 0.5;
+   g_gEntryBar  = GlobalVariableCheck(PGV("ENTRYBAR")) ? (datetime)GlobalVariableGet(PGV("ENTRYBAR")) : 0;
+   g_gLastRebal = GlobalVariableCheck(PGV("LASTREBAL")) ? (datetime)GlobalVariableGet(PGV("LASTREBAL")) : 0;
+   if(!GlobalVariableCheck(PGV("START"))) GlobalVariableSet(PGV("START"), (double)TimeCurrent());
+   g_dN = 0;
+   int fh = FileOpen(PaperFile(), FILE_READ | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE) return;
+   while(!FileIsEnding(fh))
+   {
+      string ln = FileReadString(fh);
+      string f[];
+      if(StringSplit(ln, ',', f) < 8) continue;
+      ArrayResize(g_dT, g_dN + 1); ArrayResize(g_dPos, g_dN + 1); ArrayResize(g_dE, g_dN + 1); ArrayResize(g_dV, g_dN + 1);
+      ArrayResize(g_dPx, g_dN + 1); ArrayResize(g_dPl, g_dN + 1); ArrayResize(g_dSw, g_dN + 1); ArrayResize(g_dCm, g_dN + 1);
+      g_dT[g_dN] = StringToInteger(f[0]); g_dPos[g_dN] = StringToInteger(f[1]); g_dE[g_dN] = f[2]; g_dV[g_dN] = StringToDouble(f[3]);
+      g_dPx[g_dN] = StringToDouble(f[4]); g_dPl[g_dN] = StringToDouble(f[5]); g_dSw[g_dN] = StringToDouble(f[6]); g_dCm[g_dN] = StringToDouble(f[7]);
+      g_dN++;
+   }
+   FileClose(fh);
+}
+
+double PaperSwapPerLotNight()
+{
+   int mode = (int)SymbolInfoInteger(g_gSym, SYMBOL_SWAP_MODE);
+   double sw = SymbolInfoDouble(g_gSym, SYMBOL_SWAP_LONG);
+   if(mode == SYMBOL_SWAP_MODE_POINTS)
+   {
+      double pt = SymbolInfoDouble(g_gSym, SYMBOL_POINT), ts = SymbolInfoDouble(g_gSym, SYMBOL_TRADE_TICK_SIZE), tv = SymbolInfoDouble(g_gSym, SYMBOL_TRADE_TICK_VALUE);
+      return (ts > 0) ? sw * pt / ts * tv : 0.0;
+   }
+   if(mode == SYMBOL_SWAP_MODE_CURRENCY_SYMBOL || mode == SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT || mode == SYMBOL_SWAP_MODE_CURRENCY_MARGIN) return sw;
+   if(mode == SYMBOL_SWAP_MODE_INTEREST_CURRENT || mode == SYMBOL_SWAP_MODE_INTEREST_OPEN)
+      return SymbolInfoDouble(g_gSym, SYMBOL_BID) * SymbolInfoDouble(g_gSym, SYMBOL_TRADE_CONTRACT_SIZE) * sw / 100.0 / 360.0;
+   return 0.0;
+}
+
+void PaperAccrueSwap()
+{
+   if(!g_pOpen) return;
+   datetime day = iTime(g_gSym, PERIOD_D1, 0);
+   if(day <= 0 || day == g_pSwapDay) return;
+   MqlDateTime prev;
+   TimeToStruct(g_pSwapDay, prev);
+   int mult = (prev.day_of_week == (int)SymbolInfoInteger(g_gSym, SYMBOL_SWAP_ROLLOVER3DAYS)) ? 3 : 1;
+   g_pSwapAcc += PaperSwapPerLotNight() * g_pLot * mult;
+   g_pSwapDay = day;
+   PaperSave();
+}
+
+double PaperFloating()
+{
+   if(!g_pOpen) return 0.0;
+   double bid = SymbolInfoDouble(g_gSym, SYMBOL_BID);
+   return (bid - g_pEntry) * g_pLot * SymbolInfoDouble(g_gSym, SYMBOL_TRADE_CONTRACT_SIZE) + g_pSwapAcc;
+}
+double PaperEquity() { return g_pBal + PaperFloating(); }
+
+// close at price; deferred=true -> armor sees it after the handler (like OnTradeTransaction), false -> now
+void PaperClose(double price, string why, bool deferred)
+{
+   if(!g_pOpen) return;
+   double contract = SymbolInfoDouble(g_gSym, SYMBOL_TRADE_CONTRACT_SIZE);
+   double pl = (price - g_pEntry) * g_pLot * contract;
+   double cm = -InpGoldPaperComm * g_pLot;
+   double sw = g_pSwapAcc;
+   double net = pl + sw + cm;
+   g_pBal += net;
+   PaperAddDeal(TimeCurrent(), g_pPosId, "out", g_pLot, price, pl, sw, cm);
+   g_pOpen = false; g_pSwapAcc = 0.0;
+   Print("GOLD paper close ", why, " @", DoubleToString(price, 2), " net ", DoubleToString(net, 2), " bal ", DoubleToString(g_pBal, 2));
+   if(deferred) { int n = ArraySize(g_pPend); ArrayResize(g_pPend, n + 1); g_pPend[n] = net; }
+   else CenOnClosed(net);
+   PaperSave();
+}
+
+bool PaperOpen(double lot, double ask, double sl)
+{
+   if(g_pOpen) return false;
+   double cm = -InpGoldPaperComm * lot;
+   g_pBal += cm;
+   g_pPosId++;
+   g_pOpen = true; g_pLot = lot; g_pEntry = ask; g_pSL = sl; g_pOTime = TimeCurrent();
+   g_pSwapAcc = 0.0; g_pSwapDay = iTime(g_gSym, PERIOD_D1, 0);
+   PaperAddDeal(TimeCurrent(), g_pPosId, "in", lot, ask, 0.0, 0.0, cm);
+   PaperSave();
+   return true;
+}
+
+// stop-loss: every call by price, and on each new M15 bar by the closed bar's low
+void PaperCheckSL(bool newBar)
+{
+   if(!g_pOpen || g_pSL <= 0.0) return;
+   double bid = SymbolInfoDouble(g_gSym, SYMBOL_BID);
+   bool hit = (bid > 0 && bid <= g_pSL);
+   if(!hit && newBar && iTime(g_gSym, PERIOD_M15, 1) >= g_pOTime) hit = (iLow(g_gSym, PERIOD_M15, 1) <= g_pSL);
+   if(hit) PaperClose(g_pSL, "stop-loss", false);
+}
+
+void PaperFlush()
+{
+   int n = ArraySize(g_pPend);
+   for(int i = 0; i < n; i++) CenOnClosed(g_pPend[i]);
+   ArrayResize(g_pPend, 0);
+}
+
 void GoldReport(string what)
 {
    g_gStatus = what;
@@ -729,9 +918,10 @@ void GoldRebalance()
    }
    g_gSpreadWaits = 0;
 
-   GoldClosePos();
+   if(GP()) PaperClose(SymbolInfoDouble(g_gSym, SYMBOL_BID), "rebalance", true);
+   else GoldClosePos();
 
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double equity = GP() ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY);
    double hwm = GlobalVariableGet(g_gHwmName);
    if(equity > hwm) { hwm = equity; GlobalVariableSet(g_gHwmName, hwm); }
 
@@ -766,7 +956,8 @@ void GoldRebalance()
                  " lot " + DoubleToString(lot, 2) + " rv " + DoubleToString(rv * 100, 2) + "% lev " + DoubleToString(lev, 2) +
                  " frac " + DoubleToString(frac, 3) + " eq " + DoubleToString(equity, 0) + " hwm " + DoubleToString(hwm, 0) + armor;
 
-   if(!gtrade.Buy(lot, g_gSym, 0.0, sl, 0.0, (InpGoldMode == 1 ? "CENTAUR daily" : "ATLAS6 daily")))
+   bool opened = GP() ? PaperOpen(lot, ask, sl) : gtrade.Buy(lot, g_gSym, 0.0, sl, 0.0, (InpGoldMode == 1 ? "CENTAUR daily" : "ATLAS6 daily"));
+   if(!opened)
       GoldReport("BUY FAILED err " + IntegerToString(GetLastError()) + " | " + desc);
    else
    {
@@ -777,21 +968,29 @@ void GoldRebalance()
          g_openRiskMoney = lot * contract * (ask - sl);   // for R at close
          CenPersist();
       }
-      GoldReport(desc);
+      GoldReport((GP() ? "[paper] " : "") + desc);
    }
    g_gLastRebal = iTime(g_gSym, PERIOD_D1, 0);
+   if(GP()) PaperSave();
 }
 
 // same flow as the original OnTick(), driven by new M15 bars of the gold symbol
 void GoldStep()
 {
    if(!g_goldOn || g_gSym == "") return;
+   if(GP()) { PaperAccrueSwap(); PaperCheckSL(false); }
    if(!GoldNewBar()) return;
+   if(GP()) PaperCheckSL(true);
 
-   if(g_gTokenPos && GoldPos() != 0 && iTime(g_gSym, PERIOD_M15, 0) > g_gEntryBar)
+   bool hasPos = GP() ? g_pOpen : (GoldPos() != 0);
+   if(g_gTokenPos && hasPos && iTime(g_gSym, PERIOD_M15, 0) > g_gEntryBar)
    {
-      ulong tk = GoldPos();
-      if(tk != 0) gtrade.PositionClose(tk);
+      if(GP()) PaperClose(SymbolInfoDouble(g_gSym, SYMBOL_BID), "token exit", true);
+      else
+      {
+         ulong tk = GoldPos();
+         if(tk != 0) gtrade.PositionClose(tk);
+      }
       g_gTokenPos = false;
    }
 
@@ -801,6 +1000,7 @@ void GoldStep()
    bool doneToday = (g_gLastRebal == today);
    if(!doneToday && st.hour >= InpG_RebalHour)
       GoldRebalance();
+   if(GP()) { PaperFlush(); PaperSave(); }
 }
 
 // read-only report of the gold soldier to the dashboard (same format as MAXX_WATCH)
@@ -833,33 +1033,62 @@ string GoldDealsJson()
    return s + "]";
 }
 
+string PaperDealsJson()
+{
+   string s = "[";
+   int from = MathMax(0, g_dN - 1500);
+   for(int i = from; i < g_dN; i++)
+   {
+      if(i > from) s += ",";
+      s += "{\"t\":" + IntegerToString(g_dT[i]) + ",\"pos\":" + IntegerToString(g_dPos[i]) + ",\"e\":\"" + g_dE[i] + "\",\"d\":\"" + (g_dE[i] == "in" ? "B" : "S") + "\"" +
+           ",\"sym\":\"" + g_gSym + "\",\"v\":" + DoubleToString(g_dV[i], 2) + ",\"px\":" + DoubleToString(g_dPx[i], 3) +
+           ",\"pl\":" + DoubleToString(g_dPl[i], 2) + ",\"sw\":" + DoubleToString(g_dSw[i], 2) + ",\"cm\":" + DoubleToString(g_dCm[i], 2) + "}";
+   }
+   return s + "]";
+}
+
 void GoldWatchPush()
 {
    if(!g_goldOn || IsTester() || StringFind(InpURL, "http") != 0) return;
    if(TimeCurrent() - g_gLastWatch < 300) return;
    g_gLastWatch = TimeCurrent();
+   bool paper = GP();
    double fl = 0.0;
    string opn = "[";
-   ulong tk = GoldPos();
-   if(tk != 0 && PositionSelectByTicket(tk))
+   if(paper)
    {
-      fl = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      opn += "{\"sym\":\"" + g_gSym + "\",\"d\":\"B\",\"v\":" + DoubleToString(PositionGetDouble(POSITION_VOLUME), 2) +
-              ",\"t\":" + IntegerToString((long)PositionGetInteger(POSITION_TIME)) + ",\"sl\":" + DoubleToString(PositionGetDouble(POSITION_SL), 3) +
-              ",\"pl\":" + DoubleToString(fl, 2) + "}";
+      if(g_pOpen)
+      {
+         fl = PaperFloating();
+         opn += "{\"sym\":\"" + g_gSym + "\",\"d\":\"B\",\"v\":" + DoubleToString(g_pLot, 2) + ",\"t\":" + IntegerToString((long)g_pOTime) +
+                ",\"sl\":" + DoubleToString(g_pSL, 3) + ",\"pl\":" + DoubleToString(fl, 2) + "}";
+      }
+   }
+   else
+   {
+      ulong tk = GoldPos();
+      if(tk != 0 && PositionSelectByTicket(tk))
+      {
+         fl = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+         opn += "{\"sym\":\"" + g_gSym + "\",\"d\":\"B\",\"v\":" + DoubleToString(PositionGetDouble(POSITION_VOLUME), 2) +
+                ",\"t\":" + IntegerToString((long)PositionGetInteger(POSITION_TIME)) + ",\"sl\":" + DoubleToString(PositionGetDouble(POSITION_SL), 3) +
+                ",\"pl\":" + DoubleToString(fl, 2) + "}";
+      }
    }
    opn += "]";
-   double startBal = GlobalVariableCheck(g_gGv + "STARTBAL") ? GlobalVariableGet(g_gGv + "STARTBAL") : AccountInfoDouble(ACCOUNT_BALANCE);
-   double startT   = GlobalVariableCheck(g_gGv + "STARTT") ? GlobalVariableGet(g_gGv + "STARTT") : (double)TimeCurrent();
-   string js = "{\"acct\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) +
+   double startBal = paper ? InpGoldPaperStart : (GlobalVariableCheck(g_gGv + "STARTBAL") ? GlobalVariableGet(g_gGv + "STARTBAL") : AccountInfoDouble(ACCOUNT_BALANCE));
+   double startT   = paper ? GlobalVariableGet(PGV("START")) : (GlobalVariableCheck(g_gGv + "STARTT") ? GlobalVariableGet(g_gGv + "STARTT") : (double)TimeCurrent());
+   double bal = paper ? g_pBal : AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq  = paper ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY);
+   string js = "{\"acct\":\"" + (paper ? "PAPER" : IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))) + "\"" +
                ",\"server\":\"" + AccountInfoString(ACCOUNT_SERVER) + "\"" +
-               ",\"demo\":" + ((AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_DEMO) ? "true" : "false") +
+               ",\"demo\":" + ((paper || AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_DEMO) ? "true" : "false") +
+               ",\"paper\":" + (paper ? "true" : "false") +
                ",\"now\":" + IntegerToString((long)TimeCurrent()) + ",\"start\":" + IntegerToString((long)startT) +
                ",\"startBal\":" + DoubleToString(startBal, 2) +
-               ",\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) +
-               ",\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) +
+               ",\"balance\":" + DoubleToString(bal, 2) + ",\"equity\":" + DoubleToString(eq, 2) +
                ",\"soldiers\":[{\"label\":\"" + GoldLabel() + "\",\"magic\":" + IntegerToString(InpGoldMagic) +
-               ",\"floating\":" + DoubleToString(fl, 2) + ",\"open\":" + opn + ",\"deals\":" + GoldDealsJson() + "}]}";
+               ",\"floating\":" + DoubleToString(fl, 2) + ",\"open\":" + opn + ",\"deals\":" + (paper ? PaperDealsJson() : GoldDealsJson()) + "}]}";
    string resp;
    Http("POST", "/api/watch", js, resp);
 }
@@ -867,7 +1096,7 @@ void GoldWatchPush()
 bool GoldInit()
 {
    if(!g_goldOn) return true;
-   if(!IsTester() && !InpGoldAllowLive && AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL)
+   if(!IsTester() && !InpGoldPaper && !InpGoldAllowLive && AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL)
    {
       Print("GOLD: REAL account blocked. Set InpGoldAllowLive=true to override.");
       return false;
@@ -881,14 +1110,15 @@ bool GoldInit()
    g_hAtrM15 = iATR(g_gSym, PERIOD_M15, 14);
    if(g_hEmaD1 == INVALID_HANDLE || g_hAtrD1 == INVALID_HANDLE || g_hAtrM15 == INVALID_HANDLE) { Print("GOLD: indicator handle failed"); return false; }
    // same HWM global-variable name as CLAUDE_ATLAS_v6 so a running test keeps its high-water mark
-   g_gHwmName = (InpGoldMode == 1) ? CenGV("HWM") : "ATLAS_HWM_" + g_gSym + "_" + IntegerToString((int)InpGoldMagic);
-   if(!GlobalVariableCheck(g_gHwmName)) GlobalVariableSet(g_gHwmName, AccountInfoDouble(ACCOUNT_EQUITY));
+   g_gHwmName = GP() ? PGV("HWM") : ((InpGoldMode == 1) ? CenGV("HWM") : "ATLAS_HWM_" + g_gSym + "_" + IntegerToString((int)InpGoldMagic));
+   if(GP()) PaperLoad();
+   if(!GlobalVariableCheck(g_gHwmName)) GlobalVariableSet(g_gHwmName, GP() ? PaperEquity() : AccountInfoDouble(ACCOUNT_EQUITY));
    ArrayResize(g_rWin, 0);   // R window starts empty after restart (as CENTAUR_v1)
    if(InpGoldMode == 1) CenLoad();
    g_gGv = "CEN_" + IntegerToString((int)InpGoldMagic) + "_";
    if(!GlobalVariableCheck(g_gGv + "STARTBAL")) GlobalVariableSet(g_gGv + "STARTBAL", AccountInfoDouble(ACCOUNT_BALANCE));
    if(!GlobalVariableCheck(g_gGv + "STARTT")) GlobalVariableSet(g_gGv + "STARTT", (double)TimeCurrent());
-   Print("GOLD module ", GoldLabel(), " on ", g_gSym, " magic ", InpGoldMagic, (IsTester() ? " [tester: no HTTP]" : ""));
+   Print("GOLD module ", GoldLabel(), (GP() ? " [PAPER bal " + DoubleToString(g_pBal, 2) + (g_pOpen ? " open " + DoubleToString(g_pLot, 2) : "") + "]" : " [REAL ORDERS]"), " on ", g_gSym, " magic ", InpGoldMagic, (IsTester() ? " [tester: no HTTP]" : ""));
    return true;
 }
 
@@ -965,7 +1195,7 @@ void OnTick() { GoldStep(); }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
 {
-   if(!g_goldOn || InpGoldMode != 1) return;
+   if(!g_goldOn || InpGoldMode != 1 || GP()) return;
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
    if(trans.deal == 0) return;
    if(!HistoryDealSelect(trans.deal)) return;
@@ -989,7 +1219,7 @@ void OnTimer()
 {
    GoldStep();
    GoldWatchPush();
-   if(!g_fxOn) { Comment("MAXX v2 | GOLD ", GoldLabel(), " | ", g_gStatus); return; }
+   if(!g_fxOn) { Comment("MAXX v2 | GOLD ", GoldLabel(), (GP() ? " PAPER eq " + DoubleToString(PaperEquity(), 2) : ""), " | ", g_gStatus); return; }
    // 1) day guard
    int tradesToday = 0;
    double pl = DayPL(tradesToday);
